@@ -21,6 +21,7 @@ image = (
         "soccerNet",
     )
     .apt_install("libgl1-mesa-glx", "libglib2.0-0")
+    .add_local_dir(".", "/root")
 )
 
 
@@ -41,7 +42,6 @@ def run_overfit(
 
     # Ensure local modules are importable
     sys.path.insert(0, "/root")
-
     from training.train_supervised import train
 
     # Download SoccerNet test split if not cached
