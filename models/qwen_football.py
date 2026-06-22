@@ -96,12 +96,15 @@ class QwenFootballModel(nn.Module):
         with torch.no_grad():
             hidden_states = self.vlm.visual(pixel_values, grid_thw=grid_thw)
 
-        # hidden_states: [total_patches, vision_dim]
-        # Split by image using grid_thw: patches per image = h * w
-        patches_per_img = (grid_thw[:, 1] * grid_thw[:, 2]).tolist()
+        # hidden_states is post-Qwen patch-merger, so each image has fewer
+        # visual tokens than the raw grid_h * grid_w patch count.
+        merge_size = self.vlm.config.vision_config.spatial_merge_size
+        tokens_per_img = (
+            grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2] // (merge_size * merge_size)
+        ).tolist()
         features = []
         idx = 0
-        for n in patches_per_img:
+        for n in tokens_per_img:
             pooled = hidden_states[idx:idx + n].mean(dim=0)  # [D]
             features.append(pooled)
             idx += n
