@@ -70,6 +70,12 @@ def train(
         max_frames=max_frames,
     )
     print(f"Dataset: {len(dataset)} samples from {sequence}")
+    if len(dataset) == 0:
+        raise ValueError(
+            "No training samples found "
+            f"(data_root={data_root}, split={split}, sequence={sequence}, "
+            f"input_frames={input_frames}, horizon={horizon}, max_frames={max_frames})"
+        )
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
 

@@ -4,11 +4,9 @@ Data format: MOT-style with per-frame bounding boxes in pixel coordinates.
 Each sequence has 750 frames at 25fps (30s clips), 1920x1080 JPG images.
 """
 
-import csv
 import io
-import os
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -116,7 +114,8 @@ class SoccerNetTrackingDataset(Dataset):
 
         seq_dir = self.data_root / split / sequence
 
-        # Support both extracted directory and zip file
+        # data_root is the tracking task root. It can contain either extracted
+        # split directories (test/SNMOT-116/...) or split archives (test.zip).
         if seq_dir.exists():
             self._zip = None
             self._seq_dir = seq_dir
@@ -124,8 +123,7 @@ class SoccerNetTrackingDataset(Dataset):
             self.gameinfo = parse_gameinfo((seq_dir / "gameinfo.ini").read_text())
             self.tracks = parse_gt((seq_dir / "gt" / "gt.txt").read_text())
         else:
-            # Try zip
-            zip_path = self.data_root / f"tracking-2023/{split}.zip"
+            zip_path = self.data_root / f"{split}.zip"
             if not zip_path.exists():
                 raise FileNotFoundError(f"No data found at {seq_dir} or {zip_path}")
             self._zip = zipfile.ZipFile(zip_path)

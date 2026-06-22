@@ -58,7 +58,7 @@ def run_overfit(
         data_vol.commit()
 
     results = train(
-        data_root="/data/SoccerNet/tracking-2023",
+        data_root="/data/tracking-2023",
         sequence=sequence,
         split="test",
         epochs=epochs,
