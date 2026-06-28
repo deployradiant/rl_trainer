@@ -10,9 +10,10 @@ batch_size: 2
 epochs: 100
 lr: 0.001
 log_every: 10
+train_fraction: 0.10
+eval_fraction: 0.02
+seed: 7
 
 # Data
 data_root: data/SoccerNet/tracking-2023
-# Fixed SoccerNet sequence for the first real-data overfit run.
-sequence: SNMOT-116
-split: test
+split: train

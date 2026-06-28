@@ -5,8 +5,10 @@ Each sequence has 750 frames at 25fps (30s clips), 1920x1080 JPG images.
 """
 
 import io
+import bisect
 import zipfile
 from dataclasses import dataclass
+from math import ceil
 from pathlib import Path
 
 import numpy as np
@@ -76,6 +78,54 @@ def parse_gt(content: str) -> dict[int, dict[int, tuple[int, int, int, int]]]:
 def bbox_center(bbox: tuple[int, int, int, int]) -> tuple[float, float]:
     x, y, w, h = bbox
     return (x + w / 2, y + h / 2)
+
+
+def list_sequences(data_root: str, split: str) -> list[str]:
+    """List SoccerNet sequence names from an extracted split or split zip."""
+    root = Path(data_root)
+    split_dir = root / split
+    if split_dir.exists():
+        return sorted(path.name for path in split_dir.iterdir() if path.is_dir())
+
+    zip_path = root / f"{split}.zip"
+    if not zip_path.exists():
+        raise FileNotFoundError(f"No split data found at {split_dir} or {zip_path}")
+
+    sequences = set()
+    with zipfile.ZipFile(zip_path) as archive:
+        for name in archive.namelist():
+            parts = name.split("/")
+            if len(parts) >= 3 and parts[0] == split and parts[2] == "seqinfo.ini":
+                sequences.add(parts[1])
+    return sorted(sequences)
+
+
+def choose_sequence_subsets(
+    sequences: list[str],
+    train_fraction: float,
+    eval_fraction: float,
+    seed: int,
+) -> tuple[list[str], list[str]]:
+    """Pick deterministic, non-overlapping train/eval sequence subsets."""
+    if not sequences:
+        raise ValueError("Cannot choose subsets from an empty sequence list")
+    if train_fraction <= 0 or eval_fraction <= 0:
+        raise ValueError("train_fraction and eval_fraction must be positive")
+    if train_fraction + eval_fraction > 1:
+        raise ValueError("train_fraction + eval_fraction must be <= 1")
+
+    import random
+
+    shuffled = list(sequences)
+    random.Random(seed).shuffle(shuffled)
+    n_train = max(1, ceil(len(shuffled) * train_fraction))
+    n_eval = max(1, ceil(len(shuffled) * eval_fraction))
+    if n_train + n_eval > len(shuffled):
+        raise ValueError(
+            f"Need at least {n_train + n_eval} sequences for train/eval subsets, "
+            f"found {len(shuffled)}"
+        )
+    return sorted(shuffled[:n_train]), sorted(shuffled[n_train:n_train + n_eval])
 
 
 class SoccerNetTrackingDataset(Dataset):
@@ -205,4 +255,52 @@ class SoccerNetTrackingDataset(Dataset):
             "frames": frames,
             "player_bbox": bboxes,
             "future_xy": future_xy,
+            "sequence": self.sequence,
+            "track_id": track_id,
+            "start_frame": start,
         }
+
+
+class MultiSequenceSoccerNetTrackingDataset(Dataset):
+    """Concatenate fixed SoccerNet sequences while preserving sample metadata."""
+
+    def __init__(
+        self,
+        data_root: str,
+        sequences: list[str],
+        split: str = "train",
+        input_frames: int = 5,
+        horizon: int = 25,
+        stride: int = 50,
+        image_size: int = 224,
+        max_frames: int | None = 250,
+        player_filter: str = "player team left",
+    ):
+        self.datasets = [
+            SoccerNetTrackingDataset(
+                data_root=data_root,
+                sequence=sequence,
+                split=split,
+                input_frames=input_frames,
+                horizon=horizon,
+                stride=stride,
+                image_size=image_size,
+                max_frames=max_frames,
+                player_filter=player_filter,
+            )
+            for sequence in sequences
+        ]
+        self.datasets = [dataset for dataset in self.datasets if len(dataset) > 0]
+        self.cumulative_lengths: list[int] = []
+        total = 0
+        for dataset in self.datasets:
+            total += len(dataset)
+            self.cumulative_lengths.append(total)
+
+    def __len__(self) -> int:
+        return self.cumulative_lengths[-1] if self.cumulative_lengths else 0
+
+    def __getitem__(self, idx: int) -> dict:
+        dataset_idx = bisect.bisect_right(self.cumulative_lengths, idx)
+        start = 0 if dataset_idx == 0 else self.cumulative_lengths[dataset_idx - 1]
+        return self.datasets[dataset_idx][idx - start]

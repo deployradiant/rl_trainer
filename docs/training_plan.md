@@ -80,9 +80,11 @@ until there is a strong reason.
 
 The first milestone is selected-player trajectory prediction.
 
-The fixed real-data sequence for the first overfit run is SoccerNet Tracking
-`SNMOT-116`. Keep this fixed until the pipeline can repeatedly overfit and
-report stable ADE/FDE on one sequence.
+The first real-data run should use deterministic SoccerNet `train` split
+sequence subsets: `10%` of sequences for training and `2%` for held-out eval,
+selected with seed `7`. Persist the exact sequence lists in
+`sequence_manifest.json` so future scaling runs compare against a fixed data
+slice.
 
 Input:
 
@@ -299,6 +301,10 @@ predicted 1-second movement overlay
 actual movement overlay
 error visualization
 ```
+
+The initial training loop writes `trajectory_preview.png`, which overlays one
+held-out eval sample with the actual future movement in green and the predicted
+future movement in red.
 
 The language explanation can be added after the trajectory model works:
 

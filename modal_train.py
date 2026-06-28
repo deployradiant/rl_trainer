@@ -1,4 +1,4 @@
-"""Modal entrypoint: overfit trajectory prediction on a 10s SoccerNet clip."""
+"""Modal entrypoint: train trajectory prediction on SoccerNet sequence subsets."""
 
 import modal
 
@@ -29,13 +29,17 @@ image = (
     gpu="A10G",
     volumes={"/data": data_vol, "/root/.cache/huggingface": hf_cache},
     image=image,
-    timeout=1800,
+    timeout=21600,
 )
 def run_overfit(
-    sequence: str = "SNMOT-116",
+    sequence: str = "",
+    split: str = "train",
     epochs: int = 100,
     batch_size: int = 2,
     lr: float = 1e-3,
+    train_fraction: float = 0.10,
+    eval_fraction: float = 0.02,
+    seed: int = 7,
 ):
     import os
     import sys
@@ -47,33 +51,41 @@ def run_overfit(
     data_root = "/data/tracking-2023"
     max_frames = 250
 
-    # Download SoccerNet test split if not cached
-    zip_path = f"{data_root}/test.zip"
+    # Download SoccerNet split if not cached
+    zip_path = f"{data_root}/{split}.zip"
     if not os.path.exists(zip_path):
-        print("Downloading SoccerNet tracking test split...")
+        print(f"Downloading SoccerNet tracking {split} split...")
         os.makedirs(data_root, exist_ok=True)
         from SoccerNet.Downloader import SoccerNetDownloader
         dl = SoccerNetDownloader(LocalDirectory="/data/SoccerNet")
-        dl.downloadDataTask(task="tracking-2023", split=["test"], verbose=True)
+        dl.downloadDataTask(task="tracking-2023", split=[split], verbose=True)
         # Move to expected path
         import shutil
-        shutil.move("/data/SoccerNet/tracking-2023/test.zip", zip_path)
+        shutil.move(f"/data/SoccerNet/tracking-2023/{split}.zip", zip_path)
         data_vol.commit()
 
     results = train(
         data_root=data_root,
         sequence=sequence,
-        split="test",
+        split=split,
         max_frames=max_frames,
         epochs=epochs,
         batch_size=batch_size,
         lr=lr,
+        train_fraction=train_fraction,
+        eval_fraction=eval_fraction,
+        seed=seed,
         device="cuda",
     )
 
     # Save artifacts to volume
     import shutil
-    for fname in ["training_history.json", "trajectory_head.pt"]:
+    for fname in [
+        "sequence_manifest.json",
+        "training_history.json",
+        "trajectory_head.pt",
+        "trajectory_preview.png",
+    ]:
         if os.path.exists(fname):
             shutil.copy(fname, f"/data/{fname}")
     data_vol.commit()
@@ -83,15 +95,23 @@ def run_overfit(
 
 @app.local_entrypoint()
 def main(
-    sequence: str = "SNMOT-116",
+    sequence: str = "",
+    split: str = "train",
     epochs: int = 100,
     batch_size: int = 2,
     lr: float = 1e-3,
+    train_fraction: float = 0.10,
+    eval_fraction: float = 0.02,
+    seed: int = 7,
 ):
     results = run_overfit.remote(
         sequence=sequence,
+        split=split,
         epochs=epochs,
         batch_size=batch_size,
         lr=lr,
+        train_fraction=train_fraction,
+        eval_fraction=eval_fraction,
+        seed=seed,
     )
     print(f"\nModal training complete: {results}")
