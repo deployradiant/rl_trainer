@@ -13,5 +13,6 @@ log_every: 10
 
 # Data
 data_root: data/SoccerNet/tracking-2023
+# Fixed SoccerNet sequence for the first real-data overfit run.
 sequence: SNMOT-116
 split: test

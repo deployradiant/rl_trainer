@@ -80,6 +80,10 @@ until there is a strong reason.
 
 The first milestone is selected-player trajectory prediction.
 
+The fixed real-data sequence for the first overfit run is SoccerNet Tracking
+`SNMOT-116`. Keep this fixed until the pipeline can repeatedly overfit and
+report stable ADE/FDE on one sequence.
+
 Input:
 
 ```text

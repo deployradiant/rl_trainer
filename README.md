@@ -10,3 +10,7 @@ This starts with one player.
 
 See [docs/training_plan.md](docs/training_plan.md) for the current working plan
 and minimal initial training goal.
+
+Initial real-data overfit target: SoccerNet Tracking sequence `SNMOT-116`.
+Use `modal_train.py --smoke` for the fast synthetic Modal smoke test before
+running against the real SoccerNet split.
