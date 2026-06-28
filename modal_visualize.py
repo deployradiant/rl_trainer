@@ -34,6 +34,10 @@ def _rollout():
     return _read_json(ARTIFACT_ROOT / "trajectory_rollout.json", {})
 
 
+def _reload_artifacts():
+    data_vol.reload()
+
+
 @app.function(
     image=image,
     volumes={"/data": data_vol},
@@ -51,6 +55,7 @@ def visualizer():
 
     @server.get("/api/results")
     def results():
+        _reload_artifacts()
         manifest = _read_json(ARTIFACT_ROOT / "sequence_manifest.json", {})
         history = _read_json(ARTIFACT_ROOT / "training_history.json", [])
         rollout = _rollout()
@@ -77,6 +82,7 @@ def visualizer():
 
     @server.get("/api/rollout")
     def rollout():
+        _reload_artifacts()
         data = _rollout()
         if not data:
             return JSONResponse({"error": "trajectory_rollout.json not found"}, status_code=404)
@@ -84,6 +90,7 @@ def visualizer():
 
     @server.get("/artifacts/trajectory_preview.png")
     def preview():
+        _reload_artifacts()
         path = ARTIFACT_ROOT / "trajectory_preview.png"
         if not path.exists():
             return JSONResponse({"error": "trajectory_preview.png not found"}, status_code=404)
@@ -91,6 +98,7 @@ def visualizer():
 
     @server.get("/frames/{frame_number}.jpg")
     def frame(frame_number: int):
+        _reload_artifacts()
         rollout = _rollout()
         split = rollout.get("split")
         sequence = rollout.get("sequence")

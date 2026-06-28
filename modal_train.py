@@ -34,12 +34,20 @@ image = (
 def run_overfit(
     sequence: str = "",
     split: str = "train",
+    input_frames: int = 5,
+    horizon: int = 25,
+    stride: int = 50,
+    image_size: int = 224,
+    max_frames: int = 250,
     epochs: int = 100,
     batch_size: int = 2,
     lr: float = 1e-3,
     train_fraction: float = 0.10,
     eval_fraction: float = 0.02,
     seed: int = 7,
+    overfit_samples: int = 0,
+    sample_selection: str = "first",
+    cache_visual_features: bool = False,
 ):
     import os
     import sys
@@ -49,7 +57,6 @@ def run_overfit(
     from training.train_supervised import train
 
     data_root = "/data/tracking-2023"
-    max_frames = 250
 
     # Download SoccerNet split if not cached
     zip_path = f"{data_root}/{split}.zip"
@@ -68,6 +75,10 @@ def run_overfit(
         data_root=data_root,
         sequence=sequence,
         split=split,
+        input_frames=input_frames,
+        horizon=horizon,
+        stride=stride,
+        image_size=image_size,
         max_frames=max_frames,
         epochs=epochs,
         batch_size=batch_size,
@@ -75,6 +86,9 @@ def run_overfit(
         train_fraction=train_fraction,
         eval_fraction=eval_fraction,
         seed=seed,
+        overfit_samples=overfit_samples,
+        sample_selection=sample_selection,
+        cache_visual_features=cache_visual_features,
         device="cuda",
     )
 
@@ -98,21 +112,37 @@ def run_overfit(
 def main(
     sequence: str = "",
     split: str = "train",
+    input_frames: int = 5,
+    horizon: int = 25,
+    stride: int = 50,
+    image_size: int = 224,
+    max_frames: int = 250,
     epochs: int = 100,
     batch_size: int = 2,
     lr: float = 1e-3,
     train_fraction: float = 0.10,
     eval_fraction: float = 0.02,
     seed: int = 7,
+    overfit_samples: int = 0,
+    sample_selection: str = "first",
+    cache_visual_features: bool = False,
 ):
     results = run_overfit.remote(
         sequence=sequence,
         split=split,
+        input_frames=input_frames,
+        horizon=horizon,
+        stride=stride,
+        image_size=image_size,
+        max_frames=max_frames,
         epochs=epochs,
         batch_size=batch_size,
         lr=lr,
         train_fraction=train_fraction,
         eval_fraction=eval_fraction,
         seed=seed,
+        overfit_samples=overfit_samples,
+        sample_selection=sample_selection,
+        cache_visual_features=cache_visual_features,
     )
     print(f"\nModal training complete: {results}")

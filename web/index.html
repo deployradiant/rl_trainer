@@ -126,6 +126,26 @@
                 <dt class="text-zinc-500">Eval</dt>
                 <dd id="eval-count" class="mt-1 font-medium text-white">--</dd>
               </div>
+              <div>
+                <dt class="text-zinc-500">Horizon</dt>
+                <dd id="horizon" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Overfit</dt>
+                <dd id="overfit" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Rollout ADE</dt>
+                <dd id="rollout-ade" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Actual move</dt>
+                <dd id="actual-move" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Pred move</dt>
+                <dd id="pred-move" class="mt-1 font-medium text-white">--</dd>
+              </div>
             </dl>
           </section>
 
@@ -301,7 +321,8 @@
         $("rollout-empty").classList.add("hidden");
         $("frame-scrubber").max = Math.max(0, rollout.frame_numbers.length - 1);
         $("frame-scrubber").value = 0;
-        $("rollout-meta").textContent = `${rollout.sequence} / track ${rollout.track_id} / ${rollout.frame_numbers.length} frames`;
+        const adeLabel = rollout.metrics?.ADE != null ? ` / ADE ${number(rollout.metrics.ADE)}` : "";
+        $("rollout-meta").textContent = `${rollout.sequence} / track ${rollout.track_id} / ${rollout.frame_numbers.length} frames${adeLabel}`;
         preloadFrames(data.updated_at);
         drawRolloutFrame();
       }
@@ -377,6 +398,8 @@
           const latest = data.latest || {};
           const history = data.history || [];
           const rolloutInfo = data.rollout || {};
+          const rolloutData = rolloutInfo.data || {};
+          const rolloutMetrics = rolloutData.metrics || {};
 
           $("status").textContent = rolloutInfo.available ? "Live rollout" : "Missing rollout";
           $("status").className = rolloutInfo.available
@@ -393,6 +416,11 @@
           setText("available", manifest.available_sequences);
           setText("train-count", manifest.train_sequences?.length ?? "--");
           setText("eval-count", manifest.eval_sequences?.length ?? "--");
+          setText("horizon", rolloutData.horizon ?? manifest.horizon);
+          setText("overfit", manifest.overfit_samples ? `${manifest.overfit_samples} ${manifest.sample_selection}` : "off");
+          setText("rollout-ade", number(rolloutMetrics.ADE));
+          setText("actual-move", number(rolloutMetrics.actual_displacement));
+          setText("pred-move", number(rolloutMetrics.pred_displacement));
           setText("epoch-label", latest.epoch ? `Epoch ${latest.epoch}` : "--");
 
           $("train-sequences").innerHTML = (manifest.train_sequences || []).map((seq) => chip(seq, "train")).join("");

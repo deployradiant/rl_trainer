@@ -7,7 +7,7 @@ from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
 
 class TrajectoryHead(nn.Module):
-    """MLP head: visual features + player position → future_xy [horizon, 2]."""
+    """MLP head: visual features + player position -> future deltas [horizon, 2]."""
 
     def __init__(self, input_dim: int, horizon: int = 25, hidden_dim: int = 256):
         super().__init__()
@@ -67,7 +67,7 @@ class QwenFootballModel(nn.Module):
             nn.GELU(),
         )
 
-        # Trajectory head: visual features + bbox info → future_xy
+        # Trajectory head: visual features + bbox info -> future xy deltas.
         head_input = proj_dim + input_frames * 4
         self.head = TrajectoryHead(head_input, horizon=horizon)
 
@@ -113,6 +113,23 @@ class QwenFootballModel(nn.Module):
         features = features.view(B, T, -1)  # [B, T, D]
         return features.float()
 
+    def predict_from_visual_features(
+        self,
+        visual_features: torch.Tensor,
+        player_bbox: torch.Tensor,
+    ) -> torch.Tensor:
+        """Predict future centers from cached Qwen visual features."""
+        B = visual_features.shape[0]
+        visual_flat = visual_features.reshape(B, -1)
+        visual_proj = self.visual_proj(visual_flat)
+
+        bbox_flat = player_bbox.reshape(B, -1)
+        combined = torch.cat([visual_proj, bbox_flat], dim=-1)
+
+        delta_xy = self.head(combined)
+        current_xy = player_bbox[:, -1, :2].unsqueeze(1)
+        return current_xy + delta_xy
+
     def forward(self, frames: torch.Tensor, player_bbox: torch.Tensor) -> torch.Tensor:
         """Predict future trajectory.
 
@@ -122,15 +139,5 @@ class QwenFootballModel(nn.Module):
         Returns:
             future_xy:   [B, horizon, 2] normalized predicted centers
         """
-        B = frames.shape[0]
-
         visual_features = self.extract_visual_features(frames)  # [B, T, D]
-        visual_flat = visual_features.reshape(B, -1)  # [B, T*D]
-
-        visual_proj = self.visual_proj(visual_flat)  # [B, proj_dim]
-
-        bbox_flat = player_bbox.reshape(B, -1)  # [B, T*4]
-        combined = torch.cat([visual_proj, bbox_flat], dim=-1)
-
-        future_xy = self.head(combined)  # [B, horizon, 2]
-        return future_xy
+        return self.predict_from_visual_features(visual_features, player_bbox)

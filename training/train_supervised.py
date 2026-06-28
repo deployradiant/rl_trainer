@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image, ImageDraw
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from data.tracking_dataset import (
     MultiSequenceSoccerNetTrackingDataset,
@@ -29,15 +29,22 @@ def fde(pred: np.ndarray, target: np.ndarray) -> float:
     return float(np.linalg.norm(pred[-1] - target[-1]))
 
 
+def predict_from_batch(model: nn.Module, batch: dict, device: str) -> torch.Tensor:
+    bbox = batch["player_bbox"].to(device)
+    if "visual_features" in batch:
+        visual_features = batch["visual_features"].to(device)
+        return model.predict_from_visual_features(visual_features, bbox)
+    frames = batch["frames"].to(device)
+    return model(frames, bbox)
+
+
 def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
     model.eval()
     ades, fdes = [], []
     with torch.no_grad():
         for batch in loader:
-            frames = batch["frames"].to(device)
-            bbox = batch["player_bbox"].to(device)
             target = batch["future_xy"].to(device)
-            pred = model(frames, bbox)
+            pred = predict_from_batch(model, batch, device)
             pred_np = pred.cpu().numpy()
             target_np = target.cpu().numpy()
             for i in range(len(pred_np)):
@@ -46,9 +53,61 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
     return {"ADE": float(np.mean(ades)), "FDE": float(np.mean(fdes))}
 
 
+def select_sample_indices(
+    dataset: Dataset,
+    count: int,
+    selection: str,
+) -> tuple[list[int], list[dict]]:
+    """Select a tiny deterministic sample subset for overfit demos."""
+    if count <= 0:
+        return [], []
+    count = min(count, len(dataset))
+    if selection == "first":
+        indices = list(range(count))
+    elif selection == "max_motion":
+        scored = [(dataset.motion_score(idx), idx) for idx in range(len(dataset))]
+        indices = [idx for _, idx in sorted(scored, reverse=True)[:count]]
+    else:
+        raise ValueError(f"Unknown sample_selection={selection!r}")
+    metadata = [dataset.sample_metadata(idx) for idx in indices]
+    return indices, metadata
+
+
+class CachedFeatureDataset(Dataset):
+    """Dataset wrapper that attaches frozen Qwen visual features to each sample."""
+
+    def __init__(self, dataset: Dataset, visual_features: torch.Tensor):
+        self.dataset = dataset
+        self.visual_features = visual_features
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, idx: int) -> dict:
+        sample = dict(self.dataset[idx])
+        sample["visual_features"] = self.visual_features[idx]
+        return sample
+
+
+def cache_dataset_visual_features(model: nn.Module, dataset: Dataset, device: str) -> CachedFeatureDataset:
+    """Precompute frozen Qwen features for small deterministic overfit runs."""
+    features = []
+    was_training = model.training
+    model.eval()
+    with torch.no_grad():
+        for idx in range(len(dataset)):
+            sample = dataset[idx]
+            frames = sample["frames"].unsqueeze(0).to(device)
+            visual_features = model.extract_visual_features(frames)[0].cpu()
+            features.append(visual_features)
+    if was_training:
+        model.train()
+    return CachedFeatureDataset(dataset, torch.stack(features))
+
+
 def save_prediction_artifacts(
     model: nn.Module,
-    dataset: torch.utils.data.Dataset,
+    dataset: Dataset,
     device: str,
     preview_path: str,
     rollout_path: str,
@@ -61,16 +120,23 @@ def save_prediction_artifacts(
         return
 
     sample = dataset[0]
-    frames = sample["frames"].unsqueeze(0).to(device)
     bbox = sample["player_bbox"].unsqueeze(0).to(device)
     was_training = model.training
     model.eval()
     with torch.no_grad():
-        pred = model(frames, bbox)[0].detach().cpu().numpy()
+        if "visual_features" in sample:
+            visual_features = sample["visual_features"].unsqueeze(0).to(device)
+            pred_tensor = model.predict_from_visual_features(visual_features, bbox)
+        else:
+            frames = sample["frames"].unsqueeze(0).to(device)
+            pred_tensor = model(frames, bbox)
+        pred = pred_tensor[0].detach().cpu().numpy()
     if was_training:
         model.train()
     target = sample["future_xy"].numpy()
     input_bboxes = sample["player_bbox"].numpy()
+    sample_ade = ade(pred, target)
+    sample_fde = fde(pred, target)
 
     frame = sample["frames"][-1].permute(1, 2, 0).numpy()
     image = Image.fromarray((np.clip(frame, 0.0, 1.0) * 255).astype(np.uint8)).convert("RGB")
@@ -129,6 +195,12 @@ def save_prediction_artifacts(
         "input_bboxes": input_bboxes.tolist(),
         "actual_xy": actual_path.tolist(),
         "pred_xy": pred_path.tolist(),
+        "metrics": {
+            "ADE": sample_ade,
+            "FDE": sample_fde,
+            "actual_displacement": float(np.linalg.norm(target[-1] - input_centers[-1])),
+            "pred_displacement": float(np.linalg.norm(pred[-1] - input_centers[-1])),
+        },
     }
     rollout_out = Path(rollout_path)
     rollout_out.parent.mkdir(parents=True, exist_ok=True)
@@ -180,6 +252,9 @@ def train(
     train_fraction: float = 0.10,
     eval_fraction: float = 0.02,
     seed: int = 7,
+    overfit_samples: int = 0,
+    sample_selection: str = "first",
+    cache_visual_features: bool = False,
     model_name: str = "Qwen/Qwen2-VL-2B-Instruct",
     device: str = "cuda",
     log_every: int = 10,
@@ -206,16 +281,6 @@ def train(
             seed=seed,
         )
 
-    manifest = {
-        "seed": seed,
-        "split": split,
-        "available_sequences": len(all_sequences),
-        "train_fraction": train_fraction,
-        "eval_fraction": eval_fraction,
-        "train_sequences": train_sequences,
-        "eval_sequences": eval_sequences,
-    }
-    Path("sequence_manifest.json").write_text(json.dumps(manifest, indent=2))
     print(
         f"Sequence split: {len(train_sequences)} train / {len(eval_sequences)} eval "
         f"from {len(all_sequences)} available sequences"
@@ -231,29 +296,55 @@ def train(
         image_size=image_size,
         max_frames=max_frames,
     )
-    eval_dataset = build_dataset(
-        data_root=data_root,
-        split=split,
-        sequences=eval_sequences,
-        input_frames=input_frames,
-        horizon=horizon,
-        stride=stride,
-        image_size=image_size,
-        max_frames=max_frames,
-    )
     print(f"Train dataset: {len(train_dataset)} samples")
+
+    selected_samples: list[dict] = []
+    if overfit_samples:
+        base_train_dataset = train_dataset
+        selected_indices, selected_samples = select_sample_indices(
+            base_train_dataset,
+            count=overfit_samples,
+            selection=sample_selection,
+        )
+        train_dataset = Subset(base_train_dataset, selected_indices)
+        eval_dataset = Subset(base_train_dataset, selected_indices)
+        print(
+            f"Overfit subset: {len(train_dataset)} {sample_selection} sample(s): "
+            f"{selected_samples}"
+        )
+    else:
+        eval_dataset = build_dataset(
+            data_root=data_root,
+            split=split,
+            sequences=eval_sequences,
+            input_frames=input_frames,
+            horizon=horizon,
+            stride=stride,
+            image_size=image_size,
+            max_frames=max_frames,
+        )
     print(f"Eval dataset: {len(eval_dataset)} samples")
 
-    loader_generator = torch.Generator()
-    loader_generator.manual_seed(seed)
-    loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=0,
-        generator=loader_generator,
-    )
-    eval_loader = DataLoader(eval_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    resolved_cache_visual_features = cache_visual_features or overfit_samples > 0
+    manifest = {
+        "seed": seed,
+        "split": split,
+        "available_sequences": len(all_sequences),
+        "train_fraction": train_fraction,
+        "eval_fraction": eval_fraction,
+        "train_sequences": train_sequences,
+        "eval_sequences": eval_sequences,
+        "input_frames": input_frames,
+        "horizon": horizon,
+        "stride": stride,
+        "image_size": image_size,
+        "max_frames": max_frames,
+        "overfit_samples": overfit_samples,
+        "sample_selection": sample_selection,
+        "cache_visual_features": resolved_cache_visual_features,
+        "selected_samples": selected_samples,
+    }
+    Path("sequence_manifest.json").write_text(json.dumps(manifest, indent=2))
 
     model = QwenFootballModel(
         model_name=model_name,
@@ -269,6 +360,22 @@ def train(
     n_total = sum(p.numel() for p in model.parameters())
     print(f"Trainable params: {n_trainable:,} / {n_total:,}")
 
+    if resolved_cache_visual_features:
+        print("Caching frozen Qwen visual features for this small training set...")
+        train_dataset = cache_dataset_visual_features(model, train_dataset, device)
+        eval_dataset = cache_dataset_visual_features(model, eval_dataset, device)
+
+    loader_generator = torch.Generator()
+    loader_generator.manual_seed(seed)
+    loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+        generator=loader_generator,
+    )
+    eval_loader = DataLoader(eval_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+
     optimizer = torch.optim.AdamW(trainable, lr=lr)
     loss_fn = nn.SmoothL1Loss()
 
@@ -280,11 +387,8 @@ def train(
         epoch_loss = 0.0
         n_batches = 0
         for batch in loader:
-            frames = batch["frames"].to(device)
-            bbox = batch["player_bbox"].to(device)
             target = batch["future_xy"].to(device)
-
-            pred = model(frames, bbox)
+            pred = predict_from_batch(model, batch, device)
             loss = loss_fn(pred, target)
 
             optimizer.zero_grad()
@@ -361,12 +465,20 @@ if __name__ == "__main__":
     parser.add_argument("--data-root", default="data")
     parser.add_argument("--sequence", default=None)
     parser.add_argument("--split", default="train")
+    parser.add_argument("--input-frames", type=int, default=5)
+    parser.add_argument("--horizon", type=int, default=25)
+    parser.add_argument("--stride", type=int, default=50)
+    parser.add_argument("--image-size", type=int, default=224)
+    parser.add_argument("--max-frames", type=int, default=250)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--train-fraction", type=float, default=0.10)
     parser.add_argument("--eval-fraction", type=float, default=0.02)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--overfit-samples", type=int, default=0)
+    parser.add_argument("--sample-selection", default="first", choices=["first", "max_motion"])
+    parser.add_argument("--cache-visual-features", action="store_true")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -374,11 +486,19 @@ if __name__ == "__main__":
         data_root=args.data_root,
         sequence=args.sequence,
         split=args.split,
+        input_frames=args.input_frames,
+        horizon=args.horizon,
+        stride=args.stride,
+        image_size=args.image_size,
+        max_frames=args.max_frames,
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
         train_fraction=args.train_fraction,
         eval_fraction=args.eval_fraction,
         seed=args.seed,
+        overfit_samples=args.overfit_samples,
+        sample_selection=args.sample_selection,
+        cache_visual_features=args.cache_visual_features,
         device=args.device,
     )

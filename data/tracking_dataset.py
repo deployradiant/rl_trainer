@@ -219,6 +219,26 @@ class SoccerNetTrackingDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
+    def motion_score(self, idx: int) -> float:
+        """Return future displacement for a sample in normalized image space."""
+        track_id, start = self.samples[idx]
+        track = self.tracks[track_id]
+        current_frame = start + self.input_frames - 1
+        final_frame = start + self.input_frames + self.horizon - 1
+        current_xy = np.array(bbox_center(track[current_frame]), dtype=np.float32)
+        final_xy = np.array(bbox_center(track[final_frame]), dtype=np.float32)
+        scale = np.array([self.img_width, self.img_height], dtype=np.float32)
+        return float(np.linalg.norm((final_xy - current_xy) / scale))
+
+    def sample_metadata(self, idx: int) -> dict:
+        track_id, start = self.samples[idx]
+        return {
+            "sequence": self.sequence,
+            "track_id": track_id,
+            "start_frame": start,
+            "motion_score": self.motion_score(idx),
+        }
+
     def __getitem__(self, idx: int) -> dict:
         track_id, start = self.samples[idx]
         track = self.tracks[track_id]
@@ -300,7 +320,19 @@ class MultiSequenceSoccerNetTrackingDataset(Dataset):
     def __len__(self) -> int:
         return self.cumulative_lengths[-1] if self.cumulative_lengths else 0
 
-    def __getitem__(self, idx: int) -> dict:
+    def _locate(self, idx: int) -> tuple[int, int]:
         dataset_idx = bisect.bisect_right(self.cumulative_lengths, idx)
         start = 0 if dataset_idx == 0 else self.cumulative_lengths[dataset_idx - 1]
-        return self.datasets[dataset_idx][idx - start]
+        return dataset_idx, idx - start
+
+    def motion_score(self, idx: int) -> float:
+        dataset_idx, local_idx = self._locate(idx)
+        return self.datasets[dataset_idx].motion_score(local_idx)
+
+    def sample_metadata(self, idx: int) -> dict:
+        dataset_idx, local_idx = self._locate(idx)
+        return self.datasets[dataset_idx].sample_metadata(local_idx)
+
+    def __getitem__(self, idx: int) -> dict:
+        dataset_idx, local_idx = self._locate(idx)
+        return self.datasets[dataset_idx][local_idx]
