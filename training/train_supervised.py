@@ -46,13 +46,17 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
     return {"ADE": float(np.mean(ades)), "FDE": float(np.mean(fdes))}
 
 
-def save_prediction_preview(
+def save_prediction_artifacts(
     model: nn.Module,
     dataset: torch.utils.data.Dataset,
     device: str,
-    out_path: str,
+    preview_path: str,
+    rollout_path: str,
+    split: str,
+    input_frames: int,
+    horizon: int,
 ) -> None:
-    """Save a simple predicted-vs-actual trajectory preview for one eval sample."""
+    """Save visual artifacts for one held-out eval rollout."""
     if len(dataset) == 0:
         return
 
@@ -66,6 +70,7 @@ def save_prediction_preview(
     if was_training:
         model.train()
     target = sample["future_xy"].numpy()
+    input_bboxes = sample["player_bbox"].numpy()
 
     frame = sample["frames"][-1].permute(1, 2, 0).numpy()
     image = Image.fromarray((np.clip(frame, 0.0, 1.0) * 255).astype(np.uint8)).convert("RGB")
@@ -97,10 +102,38 @@ def save_prediction_preview(
         draw.ellipse([point[0] - 2, point[1] - 2, point[0] + 2, point[1] + 2], fill=(255, 80, 80))
     draw.text((8, 8), "green=actual red=pred", fill=(255, 255, 255))
 
-    out = Path(out_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    image.save(out)
-    print(f"Preview saved to {out_path}")
+    preview_out = Path(preview_path)
+    preview_out.parent.mkdir(parents=True, exist_ok=True)
+    image.save(preview_out)
+    print(f"Preview saved to {preview_path}")
+
+    start_frame = int(sample["start_frame"])
+    input_frame_numbers = list(range(start_frame, start_frame + input_frames))
+    future_frame_numbers = list(range(start_frame + input_frames, start_frame + input_frames + horizon))
+    input_centers = input_bboxes[:, :2]
+    actual_path = np.concatenate([input_centers, target], axis=0)
+    pred_path = np.concatenate([current_xy, pred], axis=0)
+
+    rollout = {
+        "split": split,
+        "sequence": sample["sequence"],
+        "track_id": int(sample["track_id"]),
+        "start_frame": start_frame,
+        "input_frames": input_frames,
+        "horizon": horizon,
+        "fps": 25,
+        "current_index": input_frames - 1,
+        "frame_numbers": input_frame_numbers + future_frame_numbers,
+        "input_frame_numbers": input_frame_numbers,
+        "future_frame_numbers": future_frame_numbers,
+        "input_bboxes": input_bboxes.tolist(),
+        "actual_xy": actual_path.tolist(),
+        "pred_xy": pred_path.tolist(),
+    }
+    rollout_out = Path(rollout_path)
+    rollout_out.parent.mkdir(parents=True, exist_ok=True)
+    rollout_out.write_text(json.dumps(rollout, indent=2))
+    print(f"Rollout saved to {rollout_path}")
 
 
 def build_dataset(
@@ -151,6 +184,7 @@ def train(
     device: str = "cuda",
     log_every: int = 10,
     preview_path: str = "trajectory_preview.png",
+    rollout_path: str = "trajectory_rollout.json",
 ):
     """Run supervised trajectory training on fixed train/eval sequence subsets."""
 
@@ -295,7 +329,16 @@ def train(
         f"train_ADE={final['train_ADE']:.6f} train_FDE={final['train_FDE']:.6f} | "
         f"eval_ADE={final['eval_ADE']:.6f} eval_FDE={final['eval_FDE']:.6f}"
     )
-    save_prediction_preview(model, eval_dataset, device, preview_path)
+    save_prediction_artifacts(
+        model=model,
+        dataset=eval_dataset,
+        device=device,
+        preview_path=preview_path,
+        rollout_path=rollout_path,
+        split=split,
+        input_frames=input_frames,
+        horizon=horizon,
+    )
 
     # Save history
     out_path = Path("training_history.json")

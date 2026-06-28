@@ -9,4 +9,5 @@ __pycache__/
 training_history.json
 trajectory_head.pt
 trajectory_preview.png
+trajectory_rollout.json
 artifacts/
