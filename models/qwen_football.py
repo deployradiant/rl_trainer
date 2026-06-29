@@ -52,6 +52,7 @@ class QwenFootballModel(nn.Module):
         action_stride: int = 5,
         freeze_backbone: bool = True,
         proj_dim: int = 512,
+        step_dim: int = 32,
         speed_floor: float = 0.0015,
     ):
         super().__init__()
@@ -85,10 +86,24 @@ class QwenFootballModel(nn.Module):
         )
 
         self.register_buffer("action_codebook", build_relative_action_codebook())
+        self.step_embedding = nn.Embedding(self.rollout_steps, step_dim)
 
         # Policy head: visual features + rolling bbox state -> relative action logits.
-        head_input = proj_dim + input_frames * 4
+        head_input = proj_dim + input_frames * 4 + step_dim
         self.head = RelativeMotionPolicyHead(head_input, action_count=len(self.action_codebook))
+
+    def _policy_logits(
+        self,
+        visual_proj: torch.Tensor,
+        bbox_state: torch.Tensor,
+        step: int,
+    ) -> torch.Tensor:
+        B = visual_proj.shape[0]
+        bbox_flat = bbox_state.reshape(B, -1)
+        step_ids = torch.full((B,), step, dtype=torch.long, device=visual_proj.device)
+        step_features = self.step_embedding(step_ids)
+        combined = torch.cat([visual_proj, bbox_flat, step_features], dim=-1)
+        return self.head(combined)
 
     def extract_visual_features(self, frames: torch.Tensor) -> torch.Tensor:
         """Extract pooled visual features per frame.
@@ -149,9 +164,7 @@ class QwenFootballModel(nn.Module):
         action_logits = []
 
         for step in range(self.rollout_steps):
-            bbox_flat = bbox_state.reshape(B, -1)
-            combined = torch.cat([visual_proj, bbox_flat], dim=-1)
-            logits = self.head(combined)
+            logits = self._policy_logits(visual_proj, bbox_state, step)
             probs = logits.softmax(dim=-1)
             velocity = self._recent_velocity(bbox_state[:, :, :2])
             candidates = self._candidate_velocities(velocity)
@@ -176,6 +189,29 @@ class QwenFootballModel(nn.Module):
         if return_outputs:
             return {"future_xy": future_xy, "action_logits": logits}
         return future_xy
+
+    def teacher_forced_action_logits(
+        self,
+        visual_features: torch.Tensor,
+        player_bbox: torch.Tensor,
+        future_xy: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return action logits at ground-truth rollout states."""
+        B = visual_features.shape[0]
+        visual_flat = visual_features.reshape(B, -1)
+        visual_proj = self.visual_proj(visual_flat)
+        bbox_state = player_bbox
+        logits_by_step = []
+
+        for step in range(self.rollout_steps):
+            logits_by_step.append(self._policy_logits(visual_proj, bbox_state, step))
+
+            end = min((step + 1) * self.action_stride, self.horizon)
+            target_xy = future_xy[:, end - 1]
+            next_bbox = torch.cat([target_xy, bbox_state[:, -1, 2:]], dim=-1).unsqueeze(1)
+            bbox_state = torch.cat([bbox_state[:, 1:], next_bbox], dim=1)
+
+        return torch.stack(logits_by_step, dim=1)
 
     def _recent_velocity(self, xy_history: torch.Tensor) -> torch.Tensor:
         return (xy_history[:, -1] - xy_history[:, 0]) / max(1, xy_history.shape[1] - 1)

@@ -38,16 +38,31 @@ def outputs_from_batch(
     greedy: bool = False,
 ) -> dict[str, torch.Tensor]:
     bbox = batch["player_bbox"].to(device)
+    visual_features = visual_features_from_batch(model, batch, device)
+    return model.predict_from_visual_features(
+        visual_features,
+        bbox,
+        return_outputs=True,
+        greedy=greedy,
+    )
+
+
+def visual_features_from_batch(model: nn.Module, batch: dict, device: str) -> torch.Tensor:
     if "visual_features" in batch:
-        visual_features = batch["visual_features"].to(device)
-        return model.predict_from_visual_features(
-            visual_features,
-            bbox,
-            return_outputs=True,
-            greedy=greedy,
-        )
+        return batch["visual_features"].to(device)
     frames = batch["frames"].to(device)
-    return model.forward_outputs(frames, bbox, greedy=greedy)
+    return model.extract_visual_features(frames)
+
+
+def teacher_action_logits_from_batch(
+    model: nn.Module,
+    batch: dict,
+    device: str,
+) -> torch.Tensor:
+    bbox = batch["player_bbox"].to(device)
+    target = batch["future_xy"].to(device)
+    visual_features = visual_features_from_batch(model, batch, device)
+    return model.teacher_forced_action_logits(visual_features, bbox, target)
 
 
 def predict_from_batch(model: nn.Module, batch: dict, device: str) -> torch.Tensor:
@@ -59,6 +74,8 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
     ades, fdes = [], []
     action_correct = 0
     action_total = 0
+    teacher_action_correct = 0
+    teacher_action_total = 0
     with torch.no_grad():
         for batch in loader:
             bbox = batch["player_bbox"].to(device)
@@ -69,6 +86,9 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
             action_pred = outputs["action_logits"].argmax(dim=-1)
             action_correct += int((action_pred == labels).sum().item())
             action_total += int(labels.numel())
+            teacher_action_pred = teacher_action_logits_from_batch(model, batch, device).argmax(dim=-1)
+            teacher_action_correct += int((teacher_action_pred == labels).sum().item())
+            teacher_action_total += int(labels.numel())
             pred_np = pred.cpu().numpy()
             target_np = target.cpu().numpy()
             for i in range(len(pred_np)):
@@ -78,6 +98,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
         "ADE": float(np.mean(ades)),
         "FDE": float(np.mean(fdes)),
         "action_accuracy": action_correct / max(1, action_total),
+        "teacher_action_accuracy": teacher_action_correct / max(1, teacher_action_total),
     }
 
 
@@ -244,7 +265,19 @@ def build_rollout_artifact(
         sample["future_xy"].unsqueeze(0).to(device),
     )[0].detach().cpu()
     action_pred = action_logits.argmax(dim=-1)
+    if "visual_features" in sample:
+        teacher_visual_features = sample["visual_features"].unsqueeze(0).to(device)
+    else:
+        teacher_frames = sample["frames"].unsqueeze(0).to(device)
+        teacher_visual_features = model.extract_visual_features(teacher_frames)
+    teacher_action_logits = model.teacher_forced_action_logits(
+        teacher_visual_features,
+        sample["player_bbox"].unsqueeze(0).to(device),
+        sample["future_xy"].unsqueeze(0).to(device),
+    )[0].detach().cpu()
+    teacher_action_pred = teacher_action_logits.argmax(dim=-1)
     sample_action_accuracy = float((action_pred == action_labels).float().mean().item())
+    sample_teacher_action_accuracy = float((teacher_action_pred == action_labels).float().mean().item())
 
     frame = sample["frames"][-1].permute(1, 2, 0).numpy()
     image = Image.fromarray((np.clip(frame, 0.0, 1.0) * 255).astype(np.uint8)).convert("RGB")
@@ -306,6 +339,7 @@ def build_rollout_artifact(
             "actual_displacement": float(np.linalg.norm(target[-1] - input_centers[-1])),
             "pred_displacement": float(np.linalg.norm(pred[-1] - input_centers[-1])),
             "action_accuracy": sample_action_accuracy,
+            "teacher_action_accuracy": sample_teacher_action_accuracy,
         },
     }
     return rollout, image
@@ -526,9 +560,10 @@ def train(
             outputs = outputs_from_batch(model, batch, device)
             pred = outputs["future_xy"]
             action_labels = model.action_labels(bbox, target)
+            teacher_action_logits = teacher_action_logits_from_batch(model, batch, device)
             trajectory_loss = trajectory_loss_fn(pred, target)
             policy_loss = F.cross_entropy(
-                outputs["action_logits"].reshape(-1, outputs["action_logits"].shape[-1]),
+                teacher_action_logits.reshape(-1, teacher_action_logits.shape[-1]),
                 action_labels.reshape(-1),
             )
             loss = trajectory_loss + policy_loss_weight * policy_loss
@@ -554,9 +589,11 @@ def train(
                 f"Epoch {epoch:4d} | loss={avg_loss:.6f} | "
                 f"traj={avg_traj_loss:.6f} policy={avg_policy_loss:.6f} | "
                 f"train_ADE={train_metrics['ADE']:.6f} train_FDE={train_metrics['FDE']:.6f} | "
-                f"train_act={train_metrics['action_accuracy']:.3f} | "
+                f"train_act={train_metrics['action_accuracy']:.3f} "
+                f"train_teacher_act={train_metrics['teacher_action_accuracy']:.3f} | "
                 f"eval_ADE={eval_metrics['ADE']:.6f} eval_FDE={eval_metrics['FDE']:.6f} | "
-                f"eval_act={eval_metrics['action_accuracy']:.3f} | "
+                f"eval_act={eval_metrics['action_accuracy']:.3f} "
+                f"eval_teacher_act={eval_metrics['teacher_action_accuracy']:.3f} | "
                 f"{elapsed:.1f}s"
             )
             history.append({
@@ -567,9 +604,11 @@ def train(
                 "train_ADE": train_metrics["ADE"],
                 "train_FDE": train_metrics["FDE"],
                 "train_action_accuracy": train_metrics["action_accuracy"],
+                "train_teacher_action_accuracy": train_metrics["teacher_action_accuracy"],
                 "eval_ADE": eval_metrics["ADE"],
                 "eval_FDE": eval_metrics["FDE"],
                 "eval_action_accuracy": eval_metrics["action_accuracy"],
+                "eval_teacher_action_accuracy": eval_metrics["teacher_action_accuracy"],
             })
 
     # Final eval
@@ -582,13 +621,17 @@ def train(
         "eval_FDE": final_eval["FDE"],
         "train_action_accuracy": final_train["action_accuracy"],
         "eval_action_accuracy": final_eval["action_accuracy"],
+        "train_teacher_action_accuracy": final_train["teacher_action_accuracy"],
+        "eval_teacher_action_accuracy": final_eval["teacher_action_accuracy"],
     }
     print(
         "\nFinal: "
         f"train_ADE={final['train_ADE']:.6f} train_FDE={final['train_FDE']:.6f} | "
-        f"train_act={final['train_action_accuracy']:.3f} | "
+        f"train_act={final['train_action_accuracy']:.3f} "
+        f"train_teacher_act={final['train_teacher_action_accuracy']:.3f} | "
         f"eval_ADE={final['eval_ADE']:.6f} eval_FDE={final['eval_FDE']:.6f} | "
-        f"eval_act={final['eval_action_accuracy']:.3f}"
+        f"eval_act={final['eval_action_accuracy']:.3f} "
+        f"eval_teacher_act={final['eval_teacher_action_accuracy']:.3f}"
     )
     save_prediction_artifacts(
         model=model,
@@ -609,6 +652,7 @@ def train(
     # Save model head
     torch.save(
         {"visual_proj": model.visual_proj.state_dict(),
+         "step_embedding": model.step_embedding.state_dict(),
          "head": model.head.state_dict(),
          "action_codebook": model.action_codebook.cpu(),
          "action_stride": model.action_stride},
