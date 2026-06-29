@@ -48,6 +48,10 @@
                   <input id="show-pred" type="checkbox" checked class="h-3.5 w-3.5 accent-red-400" />
                   <span class="h-2.5 w-2.5 rounded-full bg-red-400"></span>Predicted
                 </label>
+                <label class="flex items-center gap-1.5 text-teal-300">
+                  <input id="show-tracking" type="checkbox" checked class="h-3.5 w-3.5 accent-teal-400" />
+                  <span class="h-2.5 w-2.5 rounded-full bg-teal-400"></span>Tracking
+                </label>
                 <label class="flex items-center gap-1.5 text-yellow-300">
                   <input id="show-velocity" type="checkbox" checked class="h-3.5 w-3.5 accent-yellow-400" />
                   <span class="h-2.5 w-2.5 rounded-full bg-yellow-400"></span>Velocity
@@ -164,6 +168,14 @@
               <div>
                 <dt class="text-zinc-500">Pred move</dt>
                 <dd id="pred-move" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Tracking ADE</dt>
+                <dd id="tracking-ade" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Tracking move</dt>
+                <dd id="tracking-move" class="mt-1 font-medium text-white">--</dd>
               </div>
               <div>
                 <dt class="text-zinc-500">Velocity ADE</dt>
@@ -394,6 +406,12 @@
             if (predPoints.length) drawPoint(ctx, predPoints[predPoints.length - 1], imageRect, "#fda4af", 5);
           }
 
+          const trackingPoints = rollout.tracking_xy?.slice(0, predCount) || [];
+          if (checked("show-tracking")) {
+            drawLine(ctx, trackingPoints, imageRect, "#2dd4bf", 4);
+            if (trackingPoints.length) drawPoint(ctx, trackingPoints[trackingPoints.length - 1], imageRect, "#5eead4", 5);
+          }
+
           const velocityPoints = rollout.baseline_velocity_xy?.slice(0, predCount) || [];
           if (checked("show-velocity")) {
             drawLine(ctx, velocityPoints, imageRect, "#facc15", 3);
@@ -493,6 +511,8 @@
         setText("rollout-ade", number(metrics.ADE));
         setText("actual-move", number(metrics.actual_displacement));
         setText("pred-move", number(metrics.pred_displacement));
+        setText("tracking-ade", number(metrics.tracking_ADE));
+        setText("tracking-move", number(metrics.tracking_displacement));
         setText("velocity-ade", number(metrics.baseline_velocity_ADE));
         setText("velocity-move", number(metrics.baseline_velocity_displacement));
         setText("position-ade", number(metrics.baseline_constant_ADE));
@@ -675,7 +695,7 @@
         const candidate = selectedRollout();
         if (candidate) configureRollout(candidate);
       });
-      ["show-actual", "show-pred", "show-velocity", "show-position", "show-mcts"].forEach((id) => {
+      ["show-actual", "show-pred", "show-tracking", "show-velocity", "show-position", "show-mcts"].forEach((id) => {
         $(id).addEventListener("change", drawRolloutFrame);
       });
       window.addEventListener("resize", () => {

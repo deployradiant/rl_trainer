@@ -2,6 +2,8 @@
 
 import torch
 
+from models.kinematics import constant_velocity_future
+
 
 def constant_position(player_bbox: torch.Tensor, horizon: int) -> torch.Tensor:
     """Repeat the last observed center for every future frame."""
@@ -11,10 +13,7 @@ def constant_position(player_bbox: torch.Tensor, horizon: int) -> torch.Tensor:
 
 def constant_velocity(player_bbox: torch.Tensor, horizon: int) -> torch.Tensor:
     """Extrapolate from the average input-window velocity."""
-    xy = player_bbox[:, :, :2]
-    velocity = (xy[:, -1] - xy[:, 0]) / max(1, xy.shape[1] - 1)
-    steps = torch.arange(1, horizon + 1, dtype=xy.dtype, device=xy.device).view(1, horizon, 1)
-    return xy[:, -1:].expand(-1, horizon, -1) + velocity.unsqueeze(1) * steps
+    return constant_velocity_future(player_bbox, horizon)
 
 
 def batch_ade(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

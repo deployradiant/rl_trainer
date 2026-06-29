@@ -3,6 +3,8 @@
 import torch
 import torch.nn as nn
 
+from models.kinematics import kinematic_features
+
 
 class ActionChunkHead(nn.Module):
     """Predict a full future xy residual chunk from visual and player state."""
@@ -33,8 +35,8 @@ class ActionChunkHead(nn.Module):
     def forward(self, visual_proj: torch.Tensor, player_bbox: torch.Tensor) -> torch.Tensor:
         """Return bounded future xy residuals shaped [B, horizon, 2]."""
         batch_size = visual_proj.shape[0]
-        bbox_flat = player_bbox.reshape(batch_size, -1)
-        state = torch.cat([visual_proj, bbox_flat], dim=-1)
+        player_features = kinematic_features(player_bbox).reshape(batch_size, -1)
+        state = torch.cat([visual_proj, player_features], dim=-1)
 
         step_ids = torch.arange(self.horizon, dtype=torch.long, device=visual_proj.device)
         step_features = self.step_embedding(step_ids).unsqueeze(0).expand(batch_size, -1, -1)

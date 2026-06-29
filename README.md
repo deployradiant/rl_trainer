@@ -18,10 +18,16 @@ The run writes `sequence_manifest.json`, `training_history.json`,
 `--save-checkpoint` when you also want the large Qwen visual-stack checkpoint
 copied to the Modal volume as `trajectory_head.pt`.
 
+The current policy is an ACT-style action chunk head. Qwen predicts a bounded
+residual over a constant-velocity future trajectory. Each run also trains a
+tracking-only chunk expert on the same target. That baseline is the robotics
+action expert with vision removed: if Qwen cannot beat it, the next bottleneck
+is visual/state context, not RL.
+
 Run the fixed-seed 10%/2% ACT-head Modal job with:
 
 ```bash
-uvx modal run modal_train.py --split train --train-fraction 0.10 --eval-fraction 0.02 --input-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --epochs 3 --batch-size 2 --lr 0.001 --endpoint-loss-weight 1.0 --mcts-simulations 0 --seed 7
+uvx modal run modal_train.py --split train --train-fraction 0.10 --eval-fraction 0.02 --input-frames 25 --visual-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --epochs 3 --batch-size 2 --lr 0.001 --tracking-lr 0.001 --endpoint-loss-weight 1.0 --mcts-simulations 0 --seed 7
 ```
 
 Artifacts are copied to the `soccernet-tracking` Modal volume, including
@@ -46,5 +52,5 @@ Current hosted visualizer:
 Run the current one-sample full-Qwen-visual + ACT chunk-head overfit gate on H100 with:
 
 ```bash
-uvx modal run modal_train.py --split train --train-sequence-count 1 --eval-sequence-count 1 --input-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --overfit-samples 1 --sample-selection max_motion --epochs 500 --batch-size 1 --lr 0.003 --endpoint-loss-weight 1.0 --mcts-simulations 0 --seed 7
+uvx modal run modal_train.py --split train --train-sequence-count 1 --eval-sequence-count 1 --input-frames 25 --visual-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --overfit-samples 1 --sample-selection max_motion --epochs 500 --batch-size 1 --lr 0.003 --tracking-lr 0.001 --endpoint-loss-weight 1.0 --mcts-simulations 0 --seed 7
 ```

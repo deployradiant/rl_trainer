@@ -23,6 +23,7 @@ def save_prediction_artifacts(
     split: str,
     input_frames: int,
     horizon: int,
+    tracking_model: nn.Module | None,
     mcts_simulations: int,
     mcts_top_k: int,
     mcts_c_puct: float,
@@ -53,6 +54,7 @@ def save_prediction_artifacts(
             split=split,
             input_frames=input_frames,
             horizon=horizon,
+            tracking_model=tracking_model,
             mcts_simulations=mcts_simulations,
             mcts_top_k=mcts_top_k,
             mcts_c_puct=mcts_c_puct,
@@ -79,6 +81,7 @@ def build_rollout_artifact(
     split: str,
     input_frames: int,
     horizon: int,
+    tracking_model: nn.Module | None,
     mcts_simulations: int,
     mcts_top_k: int,
     mcts_c_puct: float,
@@ -86,7 +89,10 @@ def build_rollout_artifact(
     """Build a rollout JSON payload and preview image for one sample."""
     bbox = sample["player_bbox"].unsqueeze(0).to(device)
     was_training = model.training
+    tracking_was_training = tracking_model.training if tracking_model is not None else False
     model.eval()
+    if tracking_model is not None:
+        tracking_model.eval()
     try:
         with torch.no_grad():
             if "visual_features" in sample:
@@ -101,6 +107,9 @@ def build_rollout_artifact(
                 greedy=True,
             )
             pred = outputs["future_xy"][0].detach().cpu().numpy()
+            tracking_pred = None
+            if tracking_model is not None:
+                tracking_pred = tracking_model(bbox)[0].detach().cpu().numpy()
             action_logits = outputs.get("action_logits")
             action_logits = action_logits[0].detach().cpu() if action_logits is not None else None
             mcts_result = None
@@ -129,6 +138,8 @@ def build_rollout_artifact(
     finally:
         if was_training:
             model.train()
+        if tracking_model is not None and tracking_was_training:
+            tracking_model.train()
 
     target = sample["future_xy"].numpy()
     input_bboxes = sample["player_bbox"].numpy()
@@ -137,6 +148,8 @@ def build_rollout_artifact(
     velocity_pred = constant_velocity(sample_bbox, horizon)[0].numpy()
     sample_ade = ade(pred, target)
     sample_fde = fde(pred, target)
+    tracking_ade = ade(tracking_pred, target) if tracking_pred is not None else None
+    tracking_fde = fde(tracking_pred, target) if tracking_pred is not None else None
     constant_ade = ade(constant_pred, target)
     constant_fde = fde(constant_pred, target)
     velocity_ade = ade(velocity_pred, target)
@@ -173,6 +186,7 @@ def build_rollout_artifact(
     current_xy = np.array([[cx, cy]], dtype=np.float32)
     actual_points = np.concatenate([current_xy, target], axis=0)
     pred_points = np.concatenate([current_xy, pred], axis=0)
+    tracking_points = np.concatenate([current_xy, tracking_pred], axis=0) if tracking_pred is not None else None
     constant_points = np.concatenate([current_xy, constant_pred], axis=0)
     velocity_points = np.concatenate([current_xy, velocity_pred], axis=0)
     mcts = _mcts_artifact(mcts_result, current_xy, target, action_labels) if action_labels is not None else None
@@ -182,10 +196,13 @@ def build_rollout_artifact(
 
     actual_pixels = to_pixels(actual_points)
     pred_pixels = to_pixels(pred_points)
+    tracking_pixels = to_pixels(tracking_points) if tracking_points is not None else None
     constant_pixels = to_pixels(constant_points)
     velocity_pixels = to_pixels(velocity_points)
     draw.line(actual_pixels, fill=(80, 220, 120), width=3)
     draw.line(pred_pixels, fill=(255, 80, 80), width=3)
+    if tracking_pixels is not None:
+        draw.line(tracking_pixels, fill=(45, 212, 191), width=3)
     draw.line(velocity_pixels, fill=(250, 204, 21), width=2)
     draw.line(constant_pixels, fill=(168, 85, 247), width=2)
     if mcts is not None:
@@ -195,10 +212,13 @@ def build_rollout_artifact(
         draw.ellipse([point[0] - 2, point[1] - 2, point[0] + 2, point[1] + 2], fill=(80, 220, 120))
     for point in pred_pixels[1::4]:
         draw.ellipse([point[0] - 2, point[1] - 2, point[0] + 2, point[1] + 2], fill=(255, 80, 80))
+    if tracking_pixels is not None:
+        for point in tracking_pixels[1::4]:
+            draw.ellipse([point[0] - 2, point[1] - 2, point[0] + 2, point[1] + 2], fill=(45, 212, 191))
     if mcts is not None:
         for point in mcts_pixels[1::4]:
             draw.ellipse([point[0] - 2, point[1] - 2, point[0] + 2, point[1] + 2], fill=(80, 180, 255))
-    draw.text((8, 8), "green=actual red=pred yellow=velocity purple=position blue=mcts", fill=(255, 255, 255))
+    draw.text((8, 8), "green=actual red=pred teal=tracking yellow=velocity purple=position blue=mcts", fill=(255, 255, 255))
 
     start_frame = int(sample["start_frame"])
     input_frame_numbers = list(range(start_frame, start_frame + input_frames))
@@ -206,6 +226,7 @@ def build_rollout_artifact(
     input_centers = input_bboxes[:, :2]
     actual_path = np.concatenate([input_centers, target], axis=0)
     pred_path = np.concatenate([current_xy, pred], axis=0)
+    tracking_path = np.concatenate([current_xy, tracking_pred], axis=0) if tracking_pred is not None else None
     constant_path = np.concatenate([current_xy, constant_pred], axis=0)
     velocity_path = np.concatenate([current_xy, velocity_pred], axis=0)
 
@@ -216,6 +237,7 @@ def build_rollout_artifact(
         "track_id": int(sample["track_id"]),
         "start_frame": start_frame,
         "input_frames": input_frames,
+        "visual_frames": int(sample.get("visual_frames", input_frames)),
         "horizon": horizon,
         "action_stride": getattr(model, "action_stride", 1),
         "action_count": int(getattr(model, "action_codebook", torch.empty(0)).shape[0]),
@@ -232,12 +254,18 @@ def build_rollout_artifact(
         "metrics": {
             "ADE": sample_ade,
             "FDE": sample_fde,
+            "tracking_ADE": tracking_ade,
+            "tracking_FDE": tracking_fde,
             "baseline_constant_ADE": constant_ade,
             "baseline_constant_FDE": constant_fde,
             "baseline_velocity_ADE": velocity_ade,
             "baseline_velocity_FDE": velocity_fde,
             "actual_displacement": float(np.linalg.norm(target[-1] - input_centers[-1])),
             "pred_displacement": float(np.linalg.norm(pred[-1] - input_centers[-1])),
+            "tracking_displacement": (
+                float(np.linalg.norm(tracking_pred[-1] - input_centers[-1]))
+                if tracking_pred is not None else None
+            ),
             "baseline_constant_displacement": float(np.linalg.norm(constant_pred[-1] - input_centers[-1])),
             "baseline_velocity_displacement": float(np.linalg.norm(velocity_pred[-1] - input_centers[-1])),
             "action_accuracy": sample_action_accuracy,
@@ -245,6 +273,8 @@ def build_rollout_artifact(
             "value_action_accuracy": sample_value_action_accuracy,
         },
     }
+    if tracking_path is not None:
+        rollout["tracking_xy"] = tracking_path.tolist()
     if mcts is not None:
         rollout["mcts_xy"] = mcts["points"].tolist()
         rollout["mcts_action_indices"] = mcts["actions"]

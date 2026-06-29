@@ -51,6 +51,7 @@ residuals from there.
 Implement now:
 
 - Constant-position and constant-velocity baselines.
+- Tracking-only chunk expert trained on the same target as Qwen.
 - ACT-style chunk head.
 - Direct PyTorch training loss for full future xy.
 - Metrics in logs, history JSON, rollout JSON, final result dict, and web UI.
@@ -78,6 +79,7 @@ Report:
 
 ```text
 ADE/FDE
+tracking_only_ADE/FDE
 constant_position_ADE/FDE
 constant_velocity_ADE/FDE
 codebook_ADE/FDE while the comparison path exists
@@ -107,6 +109,8 @@ One-sample gate:
 5-sequence and 10%/2% gates:
 
 - Chunk ADE/FDE beat constant velocity.
+- Qwen chunk ADE/FDE beat the tracking-only chunk expert before claiming vision
+  is helping.
 - Chunk ADE/FDE match or beat the codebook path while it exists.
 - Visual rollouts look plausible in the web player.
 

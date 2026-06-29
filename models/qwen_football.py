@@ -8,6 +8,7 @@ from PIL import Image
 from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
 from models.action_chunk import ActionChunkHead
+from models.kinematics import KINEMATIC_FEATURE_DIM, constant_velocity_future
 
 
 def build_relative_action_codebook() -> torch.Tensor:
@@ -51,6 +52,7 @@ class QwenFootballModel(nn.Module):
         model_name: str = "Qwen/Qwen2-VL-2B-Instruct",
         horizon: int = 25,
         input_frames: int = 5,
+        visual_frames: int | None = None,
         action_stride: int = 5,
         policy_kind: str = "chunk",
         proj_dim: int = 512,
@@ -61,6 +63,9 @@ class QwenFootballModel(nn.Module):
         if policy_kind not in {"chunk", "codebook"}:
             raise ValueError("policy_kind must be 'chunk' or 'codebook'")
         self.input_frames = input_frames
+        self.visual_frames = visual_frames or input_frames
+        if self.visual_frames <= 0 or self.visual_frames > self.input_frames:
+            raise ValueError("visual_frames must be between 1 and input_frames")
         self.horizon = horizon
         self.action_stride = action_stride
         self.policy_kind = policy_kind
@@ -85,7 +90,7 @@ class QwenFootballModel(nn.Module):
 
         # Project flattened per-frame visual features
         self.visual_proj = nn.Sequential(
-            nn.Linear(vision_dim * input_frames, proj_dim),
+            nn.Linear(vision_dim * self.visual_frames, proj_dim),
             nn.GELU(),
         )
 
@@ -97,7 +102,7 @@ class QwenFootballModel(nn.Module):
         self.head = RelativeMotionPolicyHead(head_input, action_count=len(self.action_codebook))
         self.value_head = RelativeMotionPolicyHead(head_input, action_count=len(self.action_codebook))
         self.chunk_head = ActionChunkHead(
-            state_dim=proj_dim + input_frames * 4,
+            state_dim=proj_dim + input_frames * KINEMATIC_FEATURE_DIM,
             horizon=horizon,
             step_dim=step_dim,
         )
@@ -244,10 +249,7 @@ class QwenFootballModel(nn.Module):
         return future_xy
 
     def _constant_velocity_future(self, player_bbox: torch.Tensor) -> torch.Tensor:
-        xy = player_bbox[:, :, :2]
-        velocity = self._recent_velocity(xy)
-        steps = torch.arange(1, self.horizon + 1, dtype=xy.dtype, device=xy.device).view(1, self.horizon, 1)
-        return xy[:, -1:].expand(-1, self.horizon, -1) + velocity.unsqueeze(1) * steps
+        return constant_velocity_future(player_bbox, self.horizon)
 
     def predict_codebook_from_visual_features(
         self,

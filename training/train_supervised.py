@@ -18,10 +18,12 @@ from data.tracking_dataset import (
     list_sequences,
 )
 from models.qwen_football import QwenFootballModel
+from models.tracking_policy import TrackingChunkBaseline
 from training.artifacts import save_prediction_artifacts
 from training.baselines import batch_ade, batch_fde, constant_position, constant_velocity
 
 QWEN_LR = 1e-5
+TRACKING_LR = 1e-3
 ADAM_EPS = 1e-4
 GRAD_CLIP_NORM = 1.0
 ENDPOINT_LOSS_WEIGHT = 1.0
@@ -41,12 +43,22 @@ def metric_text(value: float | None, digits: int = 3) -> str:
     return "--" if value is None else f"{value:.{digits}f}"
 
 
-def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: str,
+    tracking_model: nn.Module | None = None,
+) -> dict:
     was_training = model.training
+    tracking_was_training = tracking_model.training if tracking_model is not None else False
     model.eval()
+    if tracking_model is not None:
+        tracking_model.eval()
     sums = {
         "ADE": 0.0,
         "FDE": 0.0,
+        "tracking_ADE": 0.0,
+        "tracking_FDE": 0.0,
         "baseline_constant_ADE": 0.0,
         "baseline_constant_FDE": 0.0,
         "baseline_velocity_ADE": 0.0,
@@ -73,12 +85,16 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
                     greedy=True,
                 )
                 pred = outputs["future_xy"]
+                tracking_pred = tracking_model(bbox) if tracking_model is not None else None
                 constant_pred = constant_position(bbox, target.shape[1])
                 velocity_pred = constant_velocity(bbox, target.shape[1])
                 batch_size = target.shape[0]
                 sample_count += batch_size
                 sums["ADE"] += float(batch_ade(pred, target).sum().item())
                 sums["FDE"] += float(batch_fde(pred, target).sum().item())
+                if tracking_pred is not None:
+                    sums["tracking_ADE"] += float(batch_ade(tracking_pred, target).sum().item())
+                    sums["tracking_FDE"] += float(batch_fde(tracking_pred, target).sum().item())
                 sums["baseline_constant_ADE"] += float(batch_ade(constant_pred, target).sum().item())
                 sums["baseline_constant_FDE"] += float(batch_fde(constant_pred, target).sum().item())
                 sums["baseline_velocity_ADE"] += float(batch_ade(velocity_pred, target).sum().item())
@@ -105,7 +121,12 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
     finally:
         if was_training:
             model.train()
+        if tracking_model is not None and tracking_was_training:
+            tracking_model.train()
     metrics = {key: value / max(1, sample_count) for key, value in sums.items()}
+    if tracking_model is None:
+        metrics["tracking_ADE"] = None
+        metrics["tracking_FDE"] = None
     metrics.update({
         "action_accuracy": action_correct / action_total if action_total else None,
         "teacher_action_accuracy": teacher_action_correct / teacher_action_total if teacher_action_total else None,
@@ -139,6 +160,7 @@ def build_dataset(
     split: str,
     sequences: list[str],
     input_frames: int,
+    visual_frames: int,
     horizon: int,
     stride: int,
     image_size: int,
@@ -149,6 +171,7 @@ def build_dataset(
         sequences=sequences,
         split=split,
         input_frames=input_frames,
+        visual_frames=visual_frames,
         horizon=horizon,
         stride=stride,
         image_size=image_size,
@@ -167,7 +190,8 @@ def train(
     data_root: str,
     sequence: str | None = None,
     split: str = "train",
-    input_frames: int = 5,
+    input_frames: int = 25,
+    visual_frames: int = 5,
     horizon: int = 25,
     action_stride: int = 5,
     stride: int = 50,
@@ -185,6 +209,7 @@ def train(
     sample_selection: str = "first",
     policy_kind: str = "chunk",
     endpoint_loss_weight: float = ENDPOINT_LOSS_WEIGHT,
+    tracking_lr: float = TRACKING_LR,
     policy_loss_weight: float = 0.05,
     value_loss_weight: float = 1.0,
     value_rank_loss_weight: float = 1.0,
@@ -238,6 +263,7 @@ def train(
         split=split,
         sequences=train_sequences,
         input_frames=input_frames,
+        visual_frames=visual_frames,
         horizon=horizon,
         stride=stride,
         image_size=image_size,
@@ -265,6 +291,7 @@ def train(
             split=split,
             sequences=eval_sequences,
             input_frames=input_frames,
+            visual_frames=visual_frames,
             horizon=horizon,
             stride=stride,
             image_size=image_size,
@@ -281,6 +308,7 @@ def train(
         "train_sequences": train_sequences,
         "eval_sequences": eval_sequences,
         "input_frames": input_frames,
+        "visual_frames": visual_frames,
         "horizon": horizon,
         "action_stride": action_stride,
         "stride": stride,
@@ -292,6 +320,7 @@ def train(
         "sample_selection": sample_selection,
         "policy_kind": policy_kind,
         "endpoint_loss_weight": endpoint_loss_weight,
+        "tracking_lr": tracking_lr,
         "policy_loss_weight": policy_loss_weight,
         "value_loss_weight": value_loss_weight,
         "value_rank_loss_weight": value_rank_loss_weight,
@@ -312,10 +341,13 @@ def train(
         model_name=model_name,
         horizon=horizon,
         input_frames=input_frames,
+        visual_frames=visual_frames,
         action_stride=action_stride,
         policy_kind=policy_kind,
     )
     model.to(device)
+    tracking_model = TrackingChunkBaseline(horizon=horizon)
+    tracking_model.to(device)
 
     qwen_trainable = [p for p in model.vlm.parameters() if p.requires_grad]
     head_trainable = [
@@ -329,17 +361,21 @@ def train(
         raise ValueError("No trainable parameters selected")
     n_head_trainable = sum(p.numel() for p in head_trainable)
     n_qwen_trainable = sum(p.numel() for p in qwen_trainable)
+    n_tracking_trainable = sum(p.numel() for p in tracking_model.parameters())
     n_trainable = n_head_trainable + n_qwen_trainable
     n_total = sum(p.numel() for p in model.parameters())
     print(f"Trainable params: {n_trainable:,} / {n_total:,}")
     print(f"Head trainable params: {n_head_trainable:,}")
+    print(f"Tracking baseline trainable params: {n_tracking_trainable:,}")
     print(f"Qwen trainable params: {n_qwen_trainable:,}")
     print(f"Qwen LR: {QWEN_LR}")
+    print(f"Tracking LR: {tracking_lr}")
     names = model.qwen_trainable_parameter_names()
     preview = ", ".join(names[:8])
     suffix = " ..." if len(names) > 8 else ""
     print(f"Qwen trainable tensors: {preview}{suffix}")
     manifest["qwen_trainable_params"] = n_qwen_trainable
+    manifest["tracking_trainable_params"] = n_tracking_trainable
     manifest["qwen_trainable_tensors"] = names
     Path("sequence_manifest.json").write_text(json.dumps(manifest, indent=2))
 
@@ -358,6 +394,7 @@ def train(
     if qwen_trainable:
         optimizer_groups.append({"params": qwen_trainable, "lr": QWEN_LR})
     optimizer = torch.optim.AdamW(optimizer_groups, eps=ADAM_EPS)
+    tracking_optimizer = torch.optim.AdamW(tracking_model.parameters(), lr=tracking_lr, eps=ADAM_EPS)
     trajectory_loss_fn = nn.SmoothL1Loss()
 
     history = []
@@ -368,6 +405,8 @@ def train(
         epoch_loss = 0.0
         epoch_traj_loss = 0.0
         epoch_endpoint_loss = 0.0
+        epoch_tracking_loss = 0.0
+        epoch_tracking_endpoint_loss = 0.0
         epoch_policy_loss = 0.0
         epoch_value_loss = 0.0
         epoch_value_rank_loss = 0.0
@@ -377,6 +416,18 @@ def train(
             frames = batch["frames"].to(device)
             bbox = batch["player_bbox"].to(device)
             target = batch["future_xy"].to(device)
+
+            tracking_pred = tracking_model(bbox)
+            tracking_trajectory_loss = trajectory_loss_fn(tracking_pred, target)
+            tracking_endpoint_loss = trajectory_loss_fn(tracking_pred[:, -1], target[:, -1])
+            tracking_loss = tracking_trajectory_loss + endpoint_loss_weight * tracking_endpoint_loss
+            if not torch.isfinite(tracking_loss):
+                raise FloatingPointError(f"Non-finite tracking loss at epoch {epoch}")
+            tracking_optimizer.zero_grad()
+            tracking_loss.backward()
+            torch.nn.utils.clip_grad_norm_(tracking_model.parameters(), GRAD_CLIP_NORM)
+            tracking_optimizer.step()
+
             visual_features = model.extract_visual_features(frames)
             outputs = model.predict_from_visual_features(
                 visual_features,
@@ -428,6 +479,8 @@ def train(
             epoch_loss += loss.item()
             epoch_traj_loss += trajectory_loss.item()
             epoch_endpoint_loss += endpoint_loss.item()
+            epoch_tracking_loss += tracking_loss.item()
+            epoch_tracking_endpoint_loss += tracking_endpoint_loss.item()
             epoch_policy_loss += policy_loss.item()
             epoch_value_loss += value_loss.item()
             epoch_value_rank_loss += value_rank_loss.item()
@@ -436,27 +489,32 @@ def train(
         avg_loss = epoch_loss / max(n_batches, 1)
         avg_traj_loss = epoch_traj_loss / max(n_batches, 1)
         avg_endpoint_loss = epoch_endpoint_loss / max(n_batches, 1)
+        avg_tracking_loss = epoch_tracking_loss / max(n_batches, 1)
+        avg_tracking_endpoint_loss = epoch_tracking_endpoint_loss / max(n_batches, 1)
         avg_policy_loss = epoch_policy_loss / max(n_batches, 1)
         avg_value_loss = epoch_value_loss / max(n_batches, 1)
         avg_value_rank_loss = epoch_value_rank_loss / max(n_batches, 1)
         avg_qwen_grad_norm = epoch_qwen_grad_norm / max(n_batches, 1)
 
         if epoch % log_every == 0 or epoch == 1 or epoch == epochs:
-            train_metrics = evaluate(model, loader, device)
-            eval_metrics = evaluate(model, eval_loader, device)
+            train_metrics = evaluate(model, loader, device, tracking_model=tracking_model)
+            eval_metrics = evaluate(model, eval_loader, device, tracking_model=tracking_model)
             elapsed = time.time() - start
             print(
                 f"Epoch {epoch:4d} | loss={avg_loss:.6f} | "
                 f"traj={avg_traj_loss:.6f} endpoint={avg_endpoint_loss:.6f} "
+                f"tracking={avg_tracking_loss:.6f} tracking_endpoint={avg_tracking_endpoint_loss:.6f} "
                 f"policy={avg_policy_loss:.6f} "
                 f"value={avg_value_loss:.6f} value_rank={avg_value_rank_loss:.6f} "
                 f"qwen_grad={avg_qwen_grad_norm:.6f} | "
                 f"train_ADE={train_metrics['ADE']:.6f} train_FDE={train_metrics['FDE']:.6f} | "
+                f"train_tracking_ADE={train_metrics['tracking_ADE']:.6f} "
                 f"train_vel_ADE={train_metrics['baseline_velocity_ADE']:.6f} "
                 f"train_act={metric_text(train_metrics['action_accuracy'])} "
                 f"train_teacher_act={metric_text(train_metrics['teacher_action_accuracy'])} "
                 f"train_value_act={metric_text(train_metrics['value_action_accuracy'])} | "
                 f"eval_ADE={eval_metrics['ADE']:.6f} eval_FDE={eval_metrics['FDE']:.6f} | "
+                f"eval_tracking_ADE={eval_metrics['tracking_ADE']:.6f} "
                 f"eval_vel_ADE={eval_metrics['baseline_velocity_ADE']:.6f} "
                 f"eval_act={metric_text(eval_metrics['action_accuracy'])} "
                 f"eval_teacher_act={metric_text(eval_metrics['teacher_action_accuracy'])} "
@@ -468,12 +526,16 @@ def train(
                 "loss": avg_loss,
                 "trajectory_loss": avg_traj_loss,
                 "endpoint_loss": avg_endpoint_loss,
+                "tracking_loss": avg_tracking_loss,
+                "tracking_endpoint_loss": avg_tracking_endpoint_loss,
                 "policy_loss": avg_policy_loss,
                 "value_loss": avg_value_loss,
                 "value_rank_loss": avg_value_rank_loss,
                 "qwen_grad_norm": avg_qwen_grad_norm,
                 "train_ADE": train_metrics["ADE"],
                 "train_FDE": train_metrics["FDE"],
+                "train_tracking_ADE": train_metrics["tracking_ADE"],
+                "train_tracking_FDE": train_metrics["tracking_FDE"],
                 "train_baseline_constant_ADE": train_metrics["baseline_constant_ADE"],
                 "train_baseline_constant_FDE": train_metrics["baseline_constant_FDE"],
                 "train_baseline_velocity_ADE": train_metrics["baseline_velocity_ADE"],
@@ -483,6 +545,8 @@ def train(
                 "train_value_action_accuracy": train_metrics["value_action_accuracy"],
                 "eval_ADE": eval_metrics["ADE"],
                 "eval_FDE": eval_metrics["FDE"],
+                "eval_tracking_ADE": eval_metrics["tracking_ADE"],
+                "eval_tracking_FDE": eval_metrics["tracking_FDE"],
                 "eval_baseline_constant_ADE": eval_metrics["baseline_constant_ADE"],
                 "eval_baseline_constant_FDE": eval_metrics["baseline_constant_FDE"],
                 "eval_baseline_velocity_ADE": eval_metrics["baseline_velocity_ADE"],
@@ -493,17 +557,21 @@ def train(
             })
 
     # Final eval
-    final_train = evaluate(model, loader, device)
-    final_eval = evaluate(model, eval_loader, device)
+    final_train = evaluate(model, loader, device, tracking_model=tracking_model)
+    final_eval = evaluate(model, eval_loader, device, tracking_model=tracking_model)
     final = {
         "train_ADE": final_train["ADE"],
         "train_FDE": final_train["FDE"],
+        "train_tracking_ADE": final_train["tracking_ADE"],
+        "train_tracking_FDE": final_train["tracking_FDE"],
         "train_baseline_constant_ADE": final_train["baseline_constant_ADE"],
         "train_baseline_constant_FDE": final_train["baseline_constant_FDE"],
         "train_baseline_velocity_ADE": final_train["baseline_velocity_ADE"],
         "train_baseline_velocity_FDE": final_train["baseline_velocity_FDE"],
         "eval_ADE": final_eval["ADE"],
         "eval_FDE": final_eval["FDE"],
+        "eval_tracking_ADE": final_eval["tracking_ADE"],
+        "eval_tracking_FDE": final_eval["tracking_FDE"],
         "eval_baseline_constant_ADE": final_eval["baseline_constant_ADE"],
         "eval_baseline_constant_FDE": final_eval["baseline_constant_FDE"],
         "eval_baseline_velocity_ADE": final_eval["baseline_velocity_ADE"],
@@ -519,11 +587,13 @@ def train(
     print(
         "\nFinal: "
         f"train_ADE={final['train_ADE']:.6f} train_FDE={final['train_FDE']:.6f} | "
+        f"train_tracking_ADE={final['train_tracking_ADE']:.6f} "
         f"train_vel_ADE={final['train_baseline_velocity_ADE']:.6f} "
         f"train_act={metric_text(final['train_action_accuracy'])} "
         f"train_teacher_act={metric_text(final['train_teacher_action_accuracy'])} "
         f"train_value_act={metric_text(final['train_value_action_accuracy'])} | "
         f"eval_ADE={final['eval_ADE']:.6f} eval_FDE={final['eval_FDE']:.6f} | "
+        f"eval_tracking_ADE={final['eval_tracking_ADE']:.6f} "
         f"eval_vel_ADE={final['eval_baseline_velocity_ADE']:.6f} "
         f"eval_act={metric_text(final['eval_action_accuracy'])} "
         f"eval_teacher_act={metric_text(final['eval_teacher_action_accuracy'])} "
@@ -538,6 +608,7 @@ def train(
         split=split,
         input_frames=input_frames,
         horizon=horizon,
+        tracking_model=tracking_model,
         mcts_simulations=mcts_simulations,
         mcts_top_k=mcts_top_k,
         mcts_c_puct=mcts_c_puct,
@@ -554,6 +625,7 @@ def train(
             "visual_proj": model.visual_proj.state_dict(),
             "policy_kind": policy_kind,
             "chunk_head": model.chunk_head.state_dict(),
+            "tracking_baseline": tracking_model.state_dict(),
             "step_embedding": model.step_embedding.state_dict(),
             "head": model.head.state_dict(),
             "value_head": model.value_head.state_dict(),
@@ -580,7 +652,8 @@ if __name__ == "__main__":
     parser.add_argument("--data-root", default="data")
     parser.add_argument("--sequence", default=None)
     parser.add_argument("--split", default="train")
-    parser.add_argument("--input-frames", type=int, default=5)
+    parser.add_argument("--input-frames", type=int, default=25)
+    parser.add_argument("--visual-frames", type=int, default=5)
     parser.add_argument("--horizon", type=int, default=25)
     parser.add_argument("--action-stride", type=int, default=5)
     parser.add_argument("--stride", type=int, default=50)
@@ -598,6 +671,7 @@ if __name__ == "__main__":
     parser.add_argument("--sample-selection", default="first", choices=["first", "max_motion"])
     parser.add_argument("--policy-kind", default="chunk", choices=["chunk", "codebook"])
     parser.add_argument("--endpoint-loss-weight", type=float, default=ENDPOINT_LOSS_WEIGHT)
+    parser.add_argument("--tracking-lr", type=float, default=TRACKING_LR)
     parser.add_argument("--policy-loss-weight", type=float, default=0.05)
     parser.add_argument("--value-loss-weight", type=float, default=1.0)
     parser.add_argument("--value-rank-loss-weight", type=float, default=1.0)
@@ -615,6 +689,7 @@ if __name__ == "__main__":
         sequence=args.sequence,
         split=args.split,
         input_frames=args.input_frames,
+        visual_frames=args.visual_frames,
         horizon=args.horizon,
         action_stride=args.action_stride,
         stride=args.stride,
@@ -632,6 +707,7 @@ if __name__ == "__main__":
         sample_selection=args.sample_selection,
         policy_kind=args.policy_kind,
         endpoint_loss_weight=args.endpoint_loss_weight,
+        tracking_lr=args.tracking_lr,
         policy_loss_weight=args.policy_loss_weight,
         value_loss_weight=args.value_loss_weight,
         value_rank_loss_weight=args.value_rank_loss_weight,
