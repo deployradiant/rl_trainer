@@ -304,9 +304,9 @@ error visualization
 
 The initial training loop writes `trajectory_preview.png`, which overlays one
 held-out eval sample with the actual future movement in green and the predicted
-future movement in red. It also writes `trajectory_rollout.json` so the
-visualizer can replay the real SoccerNet frames with actual/predicted traces
-over time.
+future movement in red. It also writes `trajectory_rollouts.json` so the
+visualizer can select eval sequences and replay the real SoccerNet frames with
+actual/predicted traces over time.
 
 The language explanation can be added after the trajectory model works:
 

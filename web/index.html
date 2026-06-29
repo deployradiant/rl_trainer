@@ -38,7 +38,8 @@
                 <h2 class="text-sm font-semibold uppercase tracking-[0.18em] text-zinc-400">Rollout Player</h2>
                 <p id="rollout-meta" class="mt-1 text-sm text-zinc-500">--</p>
               </div>
-              <div class="flex items-center gap-3 text-xs">
+              <div class="flex flex-wrap items-center gap-3 text-xs">
+                <select id="sequence-select" class="h-9 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-white" aria-label="Select rollout sequence"></select>
                 <span class="flex items-center gap-1.5 text-emerald-300"><span class="h-2.5 w-2.5 rounded-full bg-emerald-400"></span>Actual</span>
                 <span class="flex items-center gap-1.5 text-red-300"><span class="h-2.5 w-2.5 rounded-full bg-red-400"></span>Predicted</span>
                 <span class="flex items-center gap-1.5 text-white"><span class="h-2.5 w-2.5 rounded-sm bg-white"></span>Box</span>
@@ -180,7 +181,9 @@
       };
 
       let rollout = null;
+      let rollouts = [];
       let rolloutVersion = null;
+      let selectedRolloutId = null;
       let frameImages = [];
       let frameIndex = 0;
       let playing = false;
@@ -197,6 +200,34 @@
 
       function setText(id, value) {
         $(id).textContent = value ?? "--";
+      }
+
+      function rolloutId(item) {
+        return `${item.sequence}:${item.track_id}:${item.start_frame}`;
+      }
+
+      function rolloutLabel(item) {
+        return `${item.sequence} / track ${item.track_id} / frame ${item.start_frame}`;
+      }
+
+      function selectedRollout() {
+        if (!rollouts.length) return null;
+        return rollouts.find((item) => rolloutId(item) === selectedRolloutId) || rollouts[0];
+      }
+
+      function syncSequenceSelect() {
+        const select = $("sequence-select");
+        select.replaceChildren(...rollouts.map((item) => {
+          const id = rolloutId(item);
+          const option = document.createElement("option");
+          option.value = id;
+          option.textContent = rolloutLabel(item);
+          return option;
+        }));
+        const selectedStillExists = rollouts.some((item) => rolloutId(item) === selectedRolloutId);
+        if (!selectedStillExists) selectedRolloutId = rollouts.length ? rolloutId(rollouts[0]) : null;
+        if (selectedRolloutId) select.value = selectedRolloutId;
+        select.disabled = rollouts.length <= 1;
       }
 
       function resizeCanvas(canvas) {
@@ -315,11 +346,23 @@
 
       function preloadFrames(updatedAt) {
         frameImages = rollout.frame_numbers.map((frameNumber) => {
-          const image = new Image();
+          const image = document.createElement("img");
+          image.decoding = "async";
+          image.loading = "eager";
           image.onload = () => drawRolloutFrame();
-          image.src = `/frames/${frameNumber}.jpg?v=${updatedAt || Date.now()}`;
+          image.src = `/frames/${encodeURIComponent(rollout.sequence)}/${frameNumber}.jpg?v=${updatedAt || Date.now()}`;
           return image;
         });
+      }
+
+      function updateRolloutStats(data) {
+        const metrics = data?.metrics || {};
+        setText("horizon", data?.horizon ?? "--");
+        setText("rollout-ade", number(metrics.ADE));
+        setText("actual-move", number(metrics.actual_displacement));
+        setText("pred-move", number(metrics.pred_displacement));
+        setText("action-stride", data?.action_stride ?? "--");
+        setText("rollout-action", number(metrics.action_accuracy));
       }
 
       function configureRollout(data) {
@@ -331,6 +374,7 @@
         $("frame-scrubber").value = 0;
         const adeLabel = rollout.metrics?.ADE != null ? ` / ADE ${number(rollout.metrics.ADE)}` : "";
         $("rollout-meta").textContent = `${rollout.sequence} / track ${rollout.track_id} / ${rollout.frame_numbers.length} frames${adeLabel}`;
+        updateRolloutStats(rollout);
         preloadFrames(data.updated_at);
         drawRolloutFrame();
       }
@@ -405,16 +449,17 @@
           const manifest = data.manifest || {};
           const latest = data.latest || {};
           const history = data.history || [];
-          const rolloutInfo = data.rollout || {};
-          const rolloutData = rolloutInfo.data || {};
-          const rolloutMetrics = rolloutData.metrics || {};
+          const rolloutsInfo = data.rollouts || {};
+          rollouts = Array.isArray(rolloutsInfo.data) ? rolloutsInfo.data : [];
+          syncSequenceSelect();
+          const rolloutData = selectedRollout() || {};
 
-          $("status").textContent = rolloutInfo.available ? "Live rollout" : "Missing rollout";
-          $("status").className = rolloutInfo.available
+          $("status").textContent = rollouts.length ? "Live rollouts" : "Missing rollouts";
+          $("status").className = rollouts.length
             ? "rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 py-1 text-emerald-100"
             : "rounded-full border border-red-400/40 bg-red-400/10 px-3 py-1 text-red-100";
 
-          const updatedAt = rolloutInfo.updated_at || data.preview?.updated_at;
+          const updatedAt = rolloutsInfo.updated_at || data.preview?.updated_at;
           $("updated").textContent = updatedAt ? new Date(updatedAt * 1000).toLocaleString() : "";
 
           for (const [key, id] of Object.entries(metricIds)) setText(id, number(latest[key]));
@@ -424,25 +469,23 @@
           setText("available", manifest.available_sequences);
           setText("train-count", manifest.train_sequences?.length ?? "--");
           setText("eval-count", manifest.eval_sequences?.length ?? "--");
-          setText("horizon", rolloutData.horizon ?? manifest.horizon);
           setText("overfit", manifest.overfit_samples ? `${manifest.overfit_samples} ${manifest.sample_selection}` : "off");
-          setText("rollout-ade", number(rolloutMetrics.ADE));
-          setText("actual-move", number(rolloutMetrics.actual_displacement));
-          setText("pred-move", number(rolloutMetrics.pred_displacement));
-          setText("action-stride", rolloutData.action_stride ?? manifest.action_stride);
-          setText("rollout-action", number(rolloutMetrics.action_accuracy));
+          updateRolloutStats(rolloutData);
           setText("epoch-label", latest.epoch ? `Epoch ${latest.epoch}` : "--");
 
           $("train-sequences").innerHTML = (manifest.train_sequences || []).map((seq) => chip(seq, "train")).join("");
           $("eval-sequences").innerHTML = (manifest.eval_sequences || []).map((seq) => chip(seq, "eval")).join("");
 
-          if (rolloutInfo.available && rolloutInfo.data) {
-            const candidate = rolloutInfo.data;
-            const version = `${updatedAt || 0}:${candidate.split}:${candidate.sequence}:${candidate.start_frame}`;
+          if (rollouts.length && rolloutData.frame_numbers) {
+            const candidate = rolloutData;
+            const version = `${updatedAt || 0}:${rolloutId(candidate)}`;
             if (version !== rolloutVersion) {
               rolloutVersion = version;
               configureRollout({ ...candidate, updated_at: updatedAt });
             }
+          } else {
+            rollout = null;
+            $("rollout-empty").classList.remove("hidden");
           }
 
           drawHistory(history);
@@ -473,6 +516,12 @@
       });
       $("speed").addEventListener("change", () => {
         if (playing) setPlaying(true);
+      });
+      $("sequence-select").addEventListener("change", (event) => {
+        selectedRolloutId = event.target.value;
+        rolloutVersion = null;
+        const candidate = selectedRollout();
+        if (candidate) configureRollout(candidate);
       });
       window.addEventListener("resize", () => {
         drawRolloutFrame();

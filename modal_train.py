@@ -109,7 +109,7 @@ def run_overfit(
         "training_history.json",
         "trajectory_head.pt",
         "trajectory_preview.png",
-        "trajectory_rollout.json",
+        "trajectory_rollouts.json",
     ]:
         if os.path.exists(fname):
             shutil.copy(fname, f"/data/{fname}")

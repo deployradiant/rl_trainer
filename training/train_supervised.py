@@ -160,19 +160,62 @@ def save_prediction_artifacts(
     dataset: Dataset,
     device: str,
     preview_path: str,
-    rollout_path: str,
+    rollouts_path: str,
     split: str,
     input_frames: int,
     horizon: int,
 ) -> None:
-    """Save visual artifacts for one held-out eval rollout."""
+    """Save visual artifacts for held-out eval rollouts."""
     if len(dataset) == 0:
         return
 
-    if hasattr(dataset, "full_sample"):
-        sample = dataset.full_sample(0)
-    else:
-        sample = dataset[0]
+    samples = []
+    seen_sequences = set()
+    for idx in range(len(dataset)):
+        sample = dataset.full_sample(idx) if hasattr(dataset, "full_sample") else dataset[idx]
+        sequence = sample["sequence"]
+        if sequence in seen_sequences:
+            continue
+        seen_sequences.add(sequence)
+        samples.append(sample)
+    if not samples:
+        return
+
+    rollouts = []
+    preview_image = None
+    for sample in samples:
+        rollout, image = build_rollout_artifact(
+            model=model,
+            sample=sample,
+            device=device,
+            split=split,
+            input_frames=input_frames,
+            horizon=horizon,
+        )
+        rollouts.append(rollout)
+        if preview_image is None:
+            preview_image = image
+
+    preview_out = Path(preview_path)
+    preview_out.parent.mkdir(parents=True, exist_ok=True)
+    preview_image.save(preview_out)
+    print(f"Preview saved to {preview_path}")
+
+    rollouts_out = Path(rollouts_path)
+    rollouts_out.parent.mkdir(parents=True, exist_ok=True)
+    rollouts_out.write_text(json.dumps({"rollouts": rollouts}, indent=2))
+    print(f"Rollout list saved to {rollouts_out}")
+
+
+def build_rollout_artifact(
+    model: nn.Module,
+    sample: dict,
+    device: str,
+    split: str,
+    input_frames: int,
+    horizon: int,
+) -> tuple[dict, Image.Image]:
+    """Build a rollout JSON payload and preview image for one sample."""
     bbox = sample["player_bbox"].unsqueeze(0).to(device)
     was_training = model.training
     model.eval()
@@ -233,11 +276,6 @@ def save_prediction_artifacts(
         draw.ellipse([point[0] - 2, point[1] - 2, point[0] + 2, point[1] + 2], fill=(255, 80, 80))
     draw.text((8, 8), "green=actual red=pred", fill=(255, 255, 255))
 
-    preview_out = Path(preview_path)
-    preview_out.parent.mkdir(parents=True, exist_ok=True)
-    image.save(preview_out)
-    print(f"Preview saved to {preview_path}")
-
     start_frame = int(sample["start_frame"])
     input_frame_numbers = list(range(start_frame, start_frame + input_frames))
     future_frame_numbers = list(range(start_frame + input_frames, start_frame + input_frames + horizon))
@@ -270,10 +308,7 @@ def save_prediction_artifacts(
             "action_accuracy": sample_action_accuracy,
         },
     }
-    rollout_out = Path(rollout_path)
-    rollout_out.parent.mkdir(parents=True, exist_ok=True)
-    rollout_out.write_text(json.dumps(rollout, indent=2))
-    print(f"Rollout saved to {rollout_path}")
+    return rollout, image
 
 
 def build_dataset(
@@ -332,7 +367,7 @@ def train(
     device: str = "cuda",
     log_every: int = 10,
     preview_path: str = "trajectory_preview.png",
-    rollout_path: str = "trajectory_rollout.json",
+    rollouts_path: str = "trajectory_rollouts.json",
 ):
     """Run supervised trajectory training on fixed train/eval sequence subsets."""
 
@@ -560,7 +595,7 @@ def train(
         dataset=eval_dataset,
         device=device,
         preview_path=preview_path,
-        rollout_path=rollout_path,
+        rollouts_path=rollouts_path,
         split=split,
         input_frames=input_frames,
         horizon=horizon,

@@ -30,8 +30,10 @@ def _read_json(path: Path, fallback):
     return json.loads(path.read_text())
 
 
-def _rollout():
-    return _read_json(ARTIFACT_ROOT / "trajectory_rollout.json", {})
+def _rollouts():
+    rollouts_path = ARTIFACT_ROOT / "trajectory_rollouts.json"
+    data = _read_json(rollouts_path, {})
+    return data.get("rollouts", [])
 
 
 def _reload_artifacts():
@@ -58,20 +60,21 @@ def visualizer():
         _reload_artifacts()
         manifest = _read_json(ARTIFACT_ROOT / "sequence_manifest.json", {})
         history = _read_json(ARTIFACT_ROOT / "training_history.json", [])
-        rollout = _rollout()
+        rollouts = _rollouts()
         preview_path = ARTIFACT_ROOT / "trajectory_preview.png"
-        rollout_path = ARTIFACT_ROOT / "trajectory_rollout.json"
+        rollouts_path = ARTIFACT_ROOT / "trajectory_rollouts.json"
         latest = history[-1] if history else {}
+        rollout_updated_at = rollouts_path.stat().st_mtime if rollouts_path.exists() else None
 
         return JSONResponse({
             "manifest": manifest,
             "history": history,
             "latest": latest,
-            "rollout": {
-                "available": rollout_path.exists(),
-                "updated_at": rollout_path.stat().st_mtime if rollout_path.exists() else None,
-                "data": rollout,
-                "frame_url": "/frames/{frame_number}.jpg",
+            "rollouts": {
+                "available": rollouts_path.exists(),
+                "updated_at": rollout_updated_at,
+                "data": rollouts,
+                "frame_url": "/frames/{sequence}/{frame_number}.jpg",
             },
             "preview": {
                 "url": "/artifacts/trajectory_preview.png",
@@ -80,13 +83,13 @@ def visualizer():
             },
         })
 
-    @server.get("/api/rollout")
-    def rollout():
+    @server.get("/api/rollouts")
+    def rollouts():
         _reload_artifacts()
-        data = _rollout()
+        data = _rollouts()
         if not data:
-            return JSONResponse({"error": "trajectory_rollout.json not found"}, status_code=404)
-        return JSONResponse(data)
+            return JSONResponse({"error": "trajectory_rollouts.json not found"}, status_code=404)
+        return JSONResponse({"rollouts": data})
 
     @server.get("/artifacts/trajectory_preview.png")
     def preview():
@@ -96,15 +99,7 @@ def visualizer():
             return JSONResponse({"error": "trajectory_preview.png not found"}, status_code=404)
         return FileResponse(path, media_type="image/png")
 
-    @server.get("/frames/{frame_number}.jpg")
-    def frame(frame_number: int):
-        _reload_artifacts()
-        rollout = _rollout()
-        split = rollout.get("split")
-        sequence = rollout.get("sequence")
-        if not split or not sequence:
-            return JSONResponse({"error": "trajectory_rollout.json not found"}, status_code=404)
-
+    def _serve_frame(split: str, sequence: str, frame_number: int):
         extracted = TRACKING_ROOT / split / sequence / "img1" / f"{frame_number:06d}.jpg"
         if extracted.exists():
             return FileResponse(extracted, media_type="image/jpeg")
@@ -119,6 +114,16 @@ def visualizer():
                 return Response(archive.read(member), media_type="image/jpeg")
         except KeyError:
             return JSONResponse({"error": f"{member} not found"}, status_code=404)
+
+    @server.get("/frames/{sequence}/{frame_number}.jpg")
+    def sequence_frame(sequence: str, frame_number: int):
+        _reload_artifacts()
+        rollouts = _rollouts()
+        rollout = next((item for item in rollouts if item.get("sequence") == sequence), {})
+        split = rollout.get("split")
+        if not split:
+            return JSONResponse({"error": f"rollout for {sequence} not found"}, status_code=404)
+        return _serve_frame(split, sequence, frame_number)
 
     @server.get("/health")
     def health():

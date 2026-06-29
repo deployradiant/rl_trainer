@@ -14,7 +14,7 @@ and minimal initial training goal.
 Initial real-data run: deterministic SoccerNet `train` split sequence subsets
 with seed `7`, using `10%` of sequences for training and `2%` for held-out eval.
 The run writes `sequence_manifest.json`, `training_history.json`,
-`trajectory_head.pt`, `trajectory_preview.png`, and `trajectory_rollout.json`.
+`trajectory_head.pt`, `trajectory_preview.png`, and `trajectory_rollouts.json`.
 
 Run the first 10%/2% Modal job with:
 
@@ -23,7 +23,7 @@ uvx modal run modal_train.py --split train --train-fraction 0.10 --eval-fraction
 ```
 
 Artifacts are copied to the `soccernet-tracking` Modal volume, including
-`trajectory_rollout.json` for frame-by-frame playback and
+`trajectory_rollouts.json` for selectable frame-by-frame playback and
 `trajectory_preview.png` for a visual predicted-vs-actual overlay.
 
 Serve the visualizer locally through Modal with:
