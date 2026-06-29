@@ -1,4 +1,4 @@
-"""Qwen VLM backbone (frozen) + football relative-motion policy head."""
+"""Qwen VLM backbone + football relative-motion policy/value heads."""
 
 from math import ceil, pi
 
@@ -37,11 +37,11 @@ class RelativeMotionPolicyHead(nn.Module):
 
 
 class QwenFootballModel(nn.Module):
-    """Frozen Qwen2-VL vision encoder + trainable trajectory head.
+    """Qwen2-VL vision encoder + trainable trajectory heads.
 
     Input frames are processed through Qwen's vision encoder individually.
-    Visual features are pooled per-frame, flattened, projected, and
-    concatenated with player bbox info before the trajectory head.
+    The task-facing Qwen vision merger is trainable by default so overfit
+    checks exercise Qwen itself instead of only the downstream heads.
     """
 
     def __init__(
@@ -50,7 +50,6 @@ class QwenFootballModel(nn.Module):
         horizon: int = 25,
         input_frames: int = 5,
         action_stride: int = 5,
-        freeze_backbone: bool = True,
         proj_dim: int = 512,
         step_dim: int = 32,
         speed_floor: float = 0.0015,
@@ -61,6 +60,7 @@ class QwenFootballModel(nn.Module):
         self.action_stride = action_stride
         self.rollout_steps = ceil(horizon / action_stride)
         self.speed_floor = speed_floor
+        self.qwen_has_trainable_parameters = False
 
         # Load Qwen VLM
         self.vlm = Qwen2VLForConditionalGeneration.from_pretrained(
@@ -72,9 +72,7 @@ class QwenFootballModel(nn.Module):
         self.processor = AutoProcessor.from_pretrained(model_name)
         self.image_processor = self.processor.image_processor
 
-        if freeze_backbone:
-            for param in self.vlm.parameters():
-                param.requires_grad = False
+        self.configure_qwen_training()
 
         # Vision encoder hidden dim (Qwen2-VL-2B: 1536)
         vision_dim = self.vlm.config.vision_config.hidden_size
@@ -92,6 +90,27 @@ class QwenFootballModel(nn.Module):
         head_input = proj_dim + input_frames * 4 + step_dim
         self.head = RelativeMotionPolicyHead(head_input, action_count=len(self.action_codebook))
         self.value_head = RelativeMotionPolicyHead(head_input, action_count=len(self.action_codebook))
+
+    def configure_qwen_training(self) -> None:
+        """Train Qwen's visual output layers by default."""
+        for param in self.vlm.parameters():
+            param.requires_grad = False
+
+        matched = self._set_qwen_requires_grad(lambda name: name.startswith("visual.merger."))
+        if matched == 0:
+            raise ValueError("Could not find trainable Qwen visual merger parameters")
+        self.qwen_has_trainable_parameters = True
+
+    def qwen_trainable_parameter_names(self) -> list[str]:
+        return [name for name, param in self.vlm.named_parameters() if param.requires_grad]
+
+    def _set_qwen_requires_grad(self, predicate) -> int:
+        matched = 0
+        for name, param in self.vlm.named_parameters():
+            if predicate(name):
+                param.requires_grad = True
+                matched += param.numel()
+        return matched
 
     def _policy_features(
         self,
@@ -143,7 +162,7 @@ class QwenFootballModel(nn.Module):
         pixel_values = inputs["pixel_values"].to(self.vlm.device, self.vlm.dtype)
         grid_thw = inputs["image_grid_thw"].to(self.vlm.device)
 
-        with torch.no_grad():
+        with torch.set_grad_enabled(self.qwen_has_trainable_parameters and torch.is_grad_enabled()):
             hidden_states = self.vlm.visual(pixel_values, grid_thw=grid_thw)
 
         # hidden_states is post-Qwen patch-merger, so each image has fewer

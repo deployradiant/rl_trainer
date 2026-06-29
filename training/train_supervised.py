@@ -21,12 +21,19 @@ from models.qwen_football import QwenFootballModel
 from training.artifacts import save_prediction_artifacts
 from training.metrics import ade, fde
 
+QWEN_LR = 1e-5
+ADAM_EPS = 1e-4
+GRAD_CLIP_NORM = 1.0
 
-def visual_features_from_batch(model: nn.Module, batch: dict, device: str) -> torch.Tensor:
-    if "visual_features" in batch:
-        return batch["visual_features"].to(device)
-    frames = batch["frames"].to(device)
-    return model.extract_visual_features(frames)
+
+def parameter_grad_norm(parameters: list[torch.nn.Parameter]) -> float:
+    total_sq = 0.0
+    for param in parameters:
+        if param.grad is None:
+            continue
+        grad_norm = param.grad.detach().float().norm().item()
+        total_sq += grad_norm * grad_norm
+    return total_sq ** 0.5
 
 
 def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
@@ -42,9 +49,10 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
     try:
         with torch.no_grad():
             for batch in loader:
+                frames = batch["frames"].to(device)
                 bbox = batch["player_bbox"].to(device)
                 target = batch["future_xy"].to(device)
-                visual_features = visual_features_from_batch(model, batch, device)
+                visual_features = model.extract_visual_features(frames)
                 outputs = model.predict_from_visual_features(
                     visual_features,
                     bbox,
@@ -107,60 +115,6 @@ def select_sample_indices(
     return indices, metadata
 
 
-class CachedFeatureDataset(Dataset):
-    """Dataset wrapper that attaches frozen Qwen visual features to each sample."""
-
-    def __init__(self, dataset: Dataset, visual_features: torch.Tensor, samples: list[dict]):
-        self.dataset = dataset
-        self.visual_features = visual_features
-        self.samples = samples
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def __getitem__(self, idx: int) -> dict:
-        sample = dict(self.samples[idx])
-        sample["visual_features"] = self.visual_features[idx]
-        return sample
-
-    def full_sample(self, idx: int) -> dict:
-        sample = dict(self.dataset[idx])
-        sample["visual_features"] = self.visual_features[idx]
-        return sample
-
-
-def cache_dataset_visual_features(
-    model: nn.Module,
-    dataset: Dataset,
-    device: str,
-    batch_size: int,
-) -> CachedFeatureDataset:
-    """Precompute frozen Qwen features for small deterministic overfit runs."""
-    features = []
-    cached_samples = []
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-    was_training = model.training
-    model.eval()
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(loader, start=1):
-            frames = batch["frames"].to(device)
-            visual_features = model.extract_visual_features(frames).cpu()
-            features.append(visual_features)
-            for i in range(visual_features.shape[0]):
-                cached_samples.append({
-                    "player_bbox": batch["player_bbox"][i].cpu(),
-                    "future_xy": batch["future_xy"][i].cpu(),
-                    "sequence": batch["sequence"][i],
-                    "track_id": int(batch["track_id"][i]),
-                    "start_frame": int(batch["start_frame"][i]),
-                })
-            if batch_idx == 1 or batch_idx == len(loader) or batch_idx % 10 == 0:
-                print(f"Cached visual feature batch {batch_idx}/{len(loader)}")
-    if was_training:
-        model.train()
-    return CachedFeatureDataset(dataset, torch.cat(features, dim=0), cached_samples)
-
-
 def build_dataset(
     data_root: str,
     split: str,
@@ -210,8 +164,6 @@ def train(
     seed: int = 7,
     overfit_samples: int = 0,
     sample_selection: str = "first",
-    cache_visual_features: bool = False,
-    feature_cache_batch_size: int = 4,
     policy_loss_weight: float = 0.05,
     value_loss_weight: float = 1.0,
     value_rank_loss_weight: float = 1.0,
@@ -298,7 +250,6 @@ def train(
         )
     print(f"Eval dataset: {len(eval_dataset)} samples")
 
-    resolved_cache_visual_features = cache_visual_features or overfit_samples > 0
     manifest = {
         "seed": seed,
         "split": split,
@@ -317,13 +268,14 @@ def train(
         "eval_sequence_count": eval_sequence_count,
         "overfit_samples": overfit_samples,
         "sample_selection": sample_selection,
-        "cache_visual_features": resolved_cache_visual_features,
-        "feature_cache_batch_size": feature_cache_batch_size,
         "policy_loss_weight": policy_loss_weight,
         "value_loss_weight": value_loss_weight,
         "value_rank_loss_weight": value_rank_loss_weight,
         "value_fde_weight": value_fde_weight,
         "value_target_scale": value_target_scale,
+        "qwen_lr": QWEN_LR,
+        "adam_eps": ADAM_EPS,
+        "grad_clip_norm": GRAD_CLIP_NORM,
         "selected_samples": selected_samples,
         "mcts_simulations": mcts_simulations,
         "mcts_top_k": mcts_top_k,
@@ -336,30 +288,34 @@ def train(
         horizon=horizon,
         input_frames=input_frames,
         action_stride=action_stride,
-        freeze_backbone=True,
     )
     model.to(device)
 
-    # Only train the projection + trajectory head
-    trainable = [p for p in model.parameters() if p.requires_grad]
-    n_trainable = sum(p.numel() for p in trainable)
+    qwen_trainable = [p for p in model.vlm.parameters() if p.requires_grad]
+    head_trainable = [
+        param for name, param in model.named_parameters()
+        if param.requires_grad and not name.startswith("vlm.")
+    ]
+    trainable = head_trainable + qwen_trainable
+    if not qwen_trainable:
+        raise ValueError("Qwen training is required, but no Qwen parameters are trainable")
+    if not trainable:
+        raise ValueError("No trainable parameters selected")
+    n_head_trainable = sum(p.numel() for p in head_trainable)
+    n_qwen_trainable = sum(p.numel() for p in qwen_trainable)
+    n_trainable = n_head_trainable + n_qwen_trainable
     n_total = sum(p.numel() for p in model.parameters())
     print(f"Trainable params: {n_trainable:,} / {n_total:,}")
-
-    if resolved_cache_visual_features:
-        print("Caching frozen Qwen visual features for this small training set...")
-        train_dataset = cache_dataset_visual_features(
-            model,
-            train_dataset,
-            device,
-            batch_size=feature_cache_batch_size,
-        )
-        eval_dataset = cache_dataset_visual_features(
-            model,
-            eval_dataset,
-            device,
-            batch_size=feature_cache_batch_size,
-        )
+    print(f"Head trainable params: {n_head_trainable:,}")
+    print(f"Qwen trainable params: {n_qwen_trainable:,}")
+    print(f"Qwen LR: {QWEN_LR}")
+    names = model.qwen_trainable_parameter_names()
+    preview = ", ".join(names[:8])
+    suffix = " ..." if len(names) > 8 else ""
+    print(f"Qwen trainable tensors: {preview}{suffix}")
+    manifest["qwen_trainable_params"] = n_qwen_trainable
+    manifest["qwen_trainable_tensors"] = names
+    Path("sequence_manifest.json").write_text(json.dumps(manifest, indent=2))
 
     loader_generator = torch.Generator()
     loader_generator.manual_seed(seed)
@@ -372,7 +328,10 @@ def train(
     )
     eval_loader = DataLoader(eval_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    optimizer = torch.optim.AdamW(trainable, lr=lr)
+    optimizer_groups = [{"params": head_trainable, "lr": lr}]
+    if qwen_trainable:
+        optimizer_groups.append({"params": qwen_trainable, "lr": QWEN_LR})
+    optimizer = torch.optim.AdamW(optimizer_groups, eps=ADAM_EPS)
     trajectory_loss_fn = nn.SmoothL1Loss()
 
     history = []
@@ -385,11 +344,13 @@ def train(
         epoch_policy_loss = 0.0
         epoch_value_loss = 0.0
         epoch_value_rank_loss = 0.0
+        epoch_qwen_grad_norm = 0.0
         n_batches = 0
         for batch in loader:
+            frames = batch["frames"].to(device)
             bbox = batch["player_bbox"].to(device)
             target = batch["future_xy"].to(device)
-            visual_features = visual_features_from_batch(model, batch, device)
+            visual_features = model.extract_visual_features(frames)
             outputs = model.predict_from_visual_features(
                 visual_features,
                 bbox,
@@ -421,9 +382,13 @@ def train(
                 + value_loss_weight * value_loss
                 + value_rank_loss_weight * value_rank_loss
             )
+            if not torch.isfinite(loss):
+                raise FloatingPointError(f"Non-finite training loss at epoch {epoch}")
 
             optimizer.zero_grad()
             loss.backward()
+            epoch_qwen_grad_norm += parameter_grad_norm(qwen_trainable)
+            torch.nn.utils.clip_grad_norm_(trainable, GRAD_CLIP_NORM)
             optimizer.step()
 
             epoch_loss += loss.item()
@@ -438,6 +403,7 @@ def train(
         avg_policy_loss = epoch_policy_loss / max(n_batches, 1)
         avg_value_loss = epoch_value_loss / max(n_batches, 1)
         avg_value_rank_loss = epoch_value_rank_loss / max(n_batches, 1)
+        avg_qwen_grad_norm = epoch_qwen_grad_norm / max(n_batches, 1)
 
         if epoch % log_every == 0 or epoch == 1 or epoch == epochs:
             train_metrics = evaluate(model, loader, device)
@@ -446,7 +412,8 @@ def train(
             print(
                 f"Epoch {epoch:4d} | loss={avg_loss:.6f} | "
                 f"traj={avg_traj_loss:.6f} policy={avg_policy_loss:.6f} "
-                f"value={avg_value_loss:.6f} value_rank={avg_value_rank_loss:.6f} | "
+                f"value={avg_value_loss:.6f} value_rank={avg_value_rank_loss:.6f} "
+                f"qwen_grad={avg_qwen_grad_norm:.6f} | "
                 f"train_ADE={train_metrics['ADE']:.6f} train_FDE={train_metrics['FDE']:.6f} | "
                 f"train_act={train_metrics['action_accuracy']:.3f} "
                 f"train_teacher_act={train_metrics['teacher_action_accuracy']:.3f} "
@@ -464,6 +431,7 @@ def train(
                 "policy_loss": avg_policy_loss,
                 "value_loss": avg_value_loss,
                 "value_rank_loss": avg_value_rank_loss,
+                "qwen_grad_norm": avg_qwen_grad_norm,
                 "train_ADE": train_metrics["ADE"],
                 "train_FDE": train_metrics["FDE"],
                 "train_action_accuracy": train_metrics["action_accuracy"],
@@ -490,6 +458,7 @@ def train(
         "eval_teacher_action_accuracy": final_eval["teacher_action_accuracy"],
         "train_value_action_accuracy": final_train["value_action_accuracy"],
         "eval_value_action_accuracy": final_eval["value_action_accuracy"],
+        "qwen_trainable_params": n_qwen_trainable,
     }
     print(
         "\nFinal: "
@@ -521,17 +490,26 @@ def train(
     out_path.write_text(json.dumps(history, indent=2))
     print(f"History saved to {out_path}")
 
-    # Save model head
-    torch.save(
-        {"visual_proj": model.visual_proj.state_dict(),
-         "step_embedding": model.step_embedding.state_dict(),
-         "head": model.head.state_dict(),
-         "value_head": model.value_head.state_dict(),
-         "action_codebook": model.action_codebook.cpu(),
-         "action_stride": model.action_stride},
-        "trajectory_head.pt",
-    )
-    print("Head weights saved to trajectory_head.pt")
+    # Save trainable task weights plus the Qwen tensors updated by this run.
+    checkpoint = {
+        "visual_proj": model.visual_proj.state_dict(),
+        "step_embedding": model.step_embedding.state_dict(),
+        "head": model.head.state_dict(),
+        "value_head": model.value_head.state_dict(),
+        "action_codebook": model.action_codebook.cpu(),
+        "action_stride": model.action_stride,
+        "qwen_lr": QWEN_LR,
+        "adam_eps": ADAM_EPS,
+        "grad_clip_norm": GRAD_CLIP_NORM,
+        "qwen_trainable_names": names,
+        "qwen_trainable": {
+            name: param.detach().cpu()
+            for name, param in model.vlm.named_parameters()
+            if param.requires_grad
+        },
+    }
+    torch.save(checkpoint, "trajectory_head.pt")
+    print("Trainable weights saved to trajectory_head.pt")
 
     return final
 
@@ -557,8 +535,6 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--overfit-samples", type=int, default=0)
     parser.add_argument("--sample-selection", default="first", choices=["first", "max_motion"])
-    parser.add_argument("--cache-visual-features", action="store_true")
-    parser.add_argument("--feature-cache-batch-size", type=int, default=4)
     parser.add_argument("--policy-loss-weight", type=float, default=0.05)
     parser.add_argument("--value-loss-weight", type=float, default=1.0)
     parser.add_argument("--value-rank-loss-weight", type=float, default=1.0)
@@ -590,8 +566,6 @@ if __name__ == "__main__":
         seed=args.seed,
         overfit_samples=args.overfit_samples,
         sample_selection=args.sample_selection,
-        cache_visual_features=args.cache_visual_features,
-        feature_cache_batch_size=args.feature_cache_batch_size,
         policy_loss_weight=args.policy_loss_weight,
         value_loss_weight=args.value_loss_weight,
         value_rank_loss_weight=args.value_rank_loss_weight,
