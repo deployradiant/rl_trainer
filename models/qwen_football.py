@@ -91,8 +91,9 @@ class QwenFootballModel(nn.Module):
         # Policy head: visual features + rolling bbox state -> relative action logits.
         head_input = proj_dim + input_frames * 4 + step_dim
         self.head = RelativeMotionPolicyHead(head_input, action_count=len(self.action_codebook))
+        self.value_head = RelativeMotionPolicyHead(head_input, action_count=len(self.action_codebook))
 
-    def _policy_logits(
+    def _policy_features(
         self,
         visual_proj: torch.Tensor,
         bbox_state: torch.Tensor,
@@ -102,8 +103,23 @@ class QwenFootballModel(nn.Module):
         bbox_flat = bbox_state.reshape(B, -1)
         step_ids = torch.full((B,), step, dtype=torch.long, device=visual_proj.device)
         step_features = self.step_embedding(step_ids)
-        combined = torch.cat([visual_proj, bbox_flat, step_features], dim=-1)
-        return self.head(combined)
+        return torch.cat([visual_proj, bbox_flat, step_features], dim=-1)
+
+    def _policy_logits(
+        self,
+        visual_proj: torch.Tensor,
+        bbox_state: torch.Tensor,
+        step: int,
+    ) -> torch.Tensor:
+        return self.head(self._policy_features(visual_proj, bbox_state, step))
+
+    def _action_values(
+        self,
+        visual_proj: torch.Tensor,
+        bbox_state: torch.Tensor,
+        step: int,
+    ) -> torch.Tensor:
+        return self.value_head(self._policy_features(visual_proj, bbox_state, step))
 
     def extract_visual_features(self, frames: torch.Tensor) -> torch.Tensor:
         """Extract pooled visual features per frame.
@@ -213,6 +229,29 @@ class QwenFootballModel(nn.Module):
 
         return torch.stack(logits_by_step, dim=1)
 
+    def teacher_forced_action_values(
+        self,
+        visual_features: torch.Tensor,
+        player_bbox: torch.Tensor,
+        future_xy: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return learned action values at ground-truth rollout states."""
+        B = visual_features.shape[0]
+        visual_flat = visual_features.reshape(B, -1)
+        visual_proj = self.visual_proj(visual_flat)
+        bbox_state = player_bbox
+        values_by_step = []
+
+        for step in range(self.rollout_steps):
+            values_by_step.append(self._action_values(visual_proj, bbox_state, step))
+
+            end = min((step + 1) * self.action_stride, self.horizon)
+            target_xy = future_xy[:, end - 1]
+            next_bbox = torch.cat([target_xy, bbox_state[:, -1, 2:]], dim=-1).unsqueeze(1)
+            bbox_state = torch.cat([bbox_state[:, 1:], next_bbox], dim=1)
+
+        return torch.stack(values_by_step, dim=1)
+
     def _recent_velocity(self, xy_history: torch.Tensor) -> torch.Tensor:
         return (xy_history[:, -1] - xy_history[:, 0]) / max(1, xy_history.shape[1] - 1)
 
@@ -258,6 +297,43 @@ class QwenFootballModel(nn.Module):
             previous_end = end
 
         return torch.stack(labels, dim=1)
+
+    def action_value_targets(
+        self,
+        player_bbox: torch.Tensor,
+        future_xy: torch.Tensor,
+        terminal_weight: float = 0.5,
+        target_scale: float = 10.0,
+    ) -> torch.Tensor:
+        """Build teacher-forced action-value targets for every codebook action.
+
+        The target is an advantage over the best one-step endpoint action at the
+        same teacher-forced state. Best action is 0, worse actions are negative.
+        MCTS can then maximize learned value without reading the future labels.
+        """
+        bbox_state = player_bbox
+        current_xy = bbox_state[:, -1, :2]
+        targets = []
+        previous_end = 0
+
+        for step in range(self.rollout_steps):
+            end = min((step + 1) * self.action_stride, self.horizon)
+            target_xy = future_xy[:, end - 1]
+            frames_this_step = end - previous_end
+            velocity = self._recent_velocity(bbox_state[:, :, :2])
+            candidates = self._candidate_velocities(velocity)
+            candidate_end = current_xy.unsqueeze(1) + candidates * max(1, frames_this_step)
+            endpoint_error = (candidate_end - target_xy.unsqueeze(1)).norm(dim=-1)
+            best_error = endpoint_error.min(dim=-1, keepdim=True).values
+            step_weight = 1.0 + (terminal_weight if end == self.horizon else 0.0)
+            targets.append((best_error - endpoint_error) * step_weight * target_scale)
+
+            next_bbox = torch.cat([target_xy, bbox_state[:, -1, 2:]], dim=-1).unsqueeze(1)
+            bbox_state = torch.cat([bbox_state[:, 1:], next_bbox], dim=1)
+            current_xy = target_xy
+            previous_end = end
+
+        return torch.stack(targets, dim=1)
 
     def forward(self, frames: torch.Tensor, player_bbox: torch.Tensor) -> torch.Tensor:
         """Predict future trajectory.

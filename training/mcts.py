@@ -16,6 +16,7 @@ class SearchNode:
     current_xy: torch.Tensor
     future_points: list[torch.Tensor]
     actions: list[int]
+    value_estimates: list[float] = field(default_factory=list)
     priors: dict[int, float] = field(default_factory=dict)
     children: dict[int, "SearchNode"] = field(default_factory=dict)
     visits: int = 0
@@ -30,76 +31,62 @@ class SearchNode:
         return self.value_sum / self.visits if self.visits else 0.0
 
 
-def trajectory_error(pred: torch.Tensor, target: torch.Tensor) -> tuple[float, float]:
-    diff = pred - target
-    distances = diff.norm(dim=-1)
-    return float(distances.mean().item()), float(distances[-1].item())
-
-
 class TrajectoryMCTS:
-    """PUCT search using policy logits as priors and target trajectory as reward.
-
-    The reward is intentionally oracle-supervised for the current overfit gate.
-    This proves the search/dynamics contract before we introduce a learned value
-    or task reward.
-    """
+    """PUCT search using policy logits as priors and learned action values."""
 
     def __init__(
         self,
         model: nn.Module,
         visual_features: torch.Tensor,
         player_bbox: torch.Tensor,
-        target_xy: torch.Tensor,
         simulations: int = 128,
         top_k: int = 8,
         c_puct: float = 1.5,
-        fde_weight: float = 0.5,
     ):
         if player_bbox.shape[0] != 1:
             raise ValueError("TrajectoryMCTS currently expects batch size 1")
         self.model = model
         self.player_bbox = player_bbox
-        self.target_xy = target_xy.squeeze(0)
         self.simulations = simulations
         self.top_k = top_k
         self.c_puct = c_puct
-        self.fde_weight = fde_weight
         self.horizon = int(model.horizon)
         self.action_stride = int(model.action_stride)
         self.rollout_steps = int(model.rollout_steps)
-        self.visual_proj = model.visual_proj(visual_features.reshape(1, -1))
+        with torch.no_grad():
+            self.visual_proj = model.visual_proj(visual_features.reshape(1, -1))
 
     def run(self) -> dict:
-        root = SearchNode(
-            step=0,
-            bbox_state=self.player_bbox,
-            current_xy=self.player_bbox[:, -1, :2],
-            future_points=[],
-            actions=[],
-        )
-        self._expand(root)
+        with torch.no_grad():
+            root = SearchNode(
+                step=0,
+                bbox_state=self.player_bbox,
+                current_xy=self.player_bbox[:, -1, :2],
+                future_points=[],
+                actions=[],
+            )
+            self._expand(root)
 
-        for _ in range(self.simulations):
-            leaf, path = self._select_leaf(root)
-            if not self._is_terminal(leaf):
-                self._expand(leaf)
-            value = self._evaluate(leaf)
-            for node in path:
-                node.visits += 1
-                node.value_sum += value
+            for _ in range(self.simulations):
+                leaf, path = self._select_leaf(root)
+                if not self._is_terminal(leaf):
+                    self._expand(leaf)
+                value = self._evaluate(leaf)
+                for node in path:
+                    node.visits += 1
+                    node.value_sum += value
 
-        actions, future_xy = self._best_rollout(root)
-        ade, fde = trajectory_error(future_xy, self.target_xy)
+            actions, future_xy, learned_value = self._best_rollout(root)
         return {
             "future_xy": future_xy,
             "actions": actions,
-            "ADE": ade,
-            "FDE": fde,
+            "learned_value": learned_value,
             "root_visits": root.visits,
             "root_children": {
                 str(action): {
                     "visits": child.visits,
                     "value": child.value,
+                    "learned_action_value": child.value_estimates[-1] if child.value_estimates else 0.0,
                     "prior": root.priors.get(action, 0.0),
                 }
                 for action, child in sorted(root.children.items())
@@ -151,6 +138,8 @@ class TrajectoryMCTS:
         }
 
     def _transition(self, node: SearchNode, action: int) -> SearchNode:
+        action_values = self.model._action_values(self.visual_proj, node.bbox_state, node.step)
+        learned_action_value = float(action_values[:, action].item())
         velocity = self.model._recent_velocity(node.bbox_state[:, :, :2])
         candidates = self.model._candidate_velocities(velocity)
         next_velocity = candidates[:, action]
@@ -169,15 +158,16 @@ class TrajectoryMCTS:
             current_xy=current_xy,
             future_points=future_points,
             actions=node.actions + [action],
+            value_estimates=node.value_estimates + [learned_action_value],
         )
 
     def _evaluate(self, node: SearchNode) -> float:
-        _, future_xy = self._complete_with_policy(node)
-        ade, fde = trajectory_error(future_xy, self.target_xy)
-        return -(ade + self.fde_weight * fde)
+        _, _, learned_value = self._complete_with_policy(node)
+        return learned_value
 
-    def _complete_with_policy(self, node: SearchNode) -> tuple[list[int], torch.Tensor]:
+    def _complete_with_policy(self, node: SearchNode) -> tuple[list[int], torch.Tensor, float]:
         actions = list(node.actions)
+        value_estimates = list(node.value_estimates)
         bbox_state = node.bbox_state
         current_xy = node.current_xy
         future_points = list(node.future_points)
@@ -186,6 +176,8 @@ class TrajectoryMCTS:
             logits = self.model._policy_logits(self.visual_proj, bbox_state, step)
             action = int(logits.argmax(dim=-1).item())
             actions.append(action)
+            action_values = self.model._action_values(self.visual_proj, bbox_state, step)
+            value_estimates.append(float(action_values[:, action].item()))
             velocity = self.model._recent_velocity(bbox_state[:, :, :2])
             candidates = self.model._candidate_velocities(velocity)
             next_velocity = candidates[:, action]
@@ -197,9 +189,10 @@ class TrajectoryMCTS:
             next_bbox = torch.cat([current_xy, bbox_state[:, -1, 2:]], dim=-1).unsqueeze(1)
             bbox_state = torch.cat([bbox_state[:, 1:], next_bbox], dim=1)
             step += 1
-        return actions, torch.stack(future_points)
+        learned_value = float(np.mean(value_estimates)) if value_estimates else 0.0
+        return actions, torch.stack(future_points), learned_value
 
-    def _best_rollout(self, root: SearchNode) -> tuple[list[int], torch.Tensor]:
+    def _best_rollout(self, root: SearchNode) -> tuple[list[int], torch.Tensor, float]:
         node = root
         while node.children and not self._is_terminal(node):
             node = max(node.children.values(), key=lambda child: (child.visits, child.value))
@@ -213,20 +206,16 @@ def run_trajectory_mcts(
     model: nn.Module,
     visual_features: torch.Tensor,
     player_bbox: torch.Tensor,
-    target_xy: torch.Tensor,
     simulations: int,
     top_k: int,
     c_puct: float,
-    fde_weight: float,
 ) -> dict:
     search = TrajectoryMCTS(
         model=model,
         visual_features=visual_features,
         player_bbox=player_bbox,
-        target_xy=target_xy,
         simulations=simulations,
         top_k=top_k,
         c_puct=c_puct,
-        fde_weight=fde_weight,
     )
     return search.run()

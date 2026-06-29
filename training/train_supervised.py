@@ -66,6 +66,17 @@ def teacher_action_logits_from_batch(
     return model.teacher_forced_action_logits(visual_features, bbox, target)
 
 
+def teacher_action_values_from_batch(
+    model: nn.Module,
+    batch: dict,
+    device: str,
+) -> torch.Tensor:
+    bbox = batch["player_bbox"].to(device)
+    target = batch["future_xy"].to(device)
+    visual_features = visual_features_from_batch(model, batch, device)
+    return model.teacher_forced_action_values(visual_features, bbox, target)
+
+
 def predict_from_batch(model: nn.Module, batch: dict, device: str) -> torch.Tensor:
     return outputs_from_batch(model, batch, device, greedy=True)["future_xy"]
 
@@ -77,6 +88,8 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
     action_total = 0
     teacher_action_correct = 0
     teacher_action_total = 0
+    value_action_correct = 0
+    value_action_total = 0
     with torch.no_grad():
         for batch in loader:
             bbox = batch["player_bbox"].to(device)
@@ -90,6 +103,9 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
             teacher_action_pred = teacher_action_logits_from_batch(model, batch, device).argmax(dim=-1)
             teacher_action_correct += int((teacher_action_pred == labels).sum().item())
             teacher_action_total += int(labels.numel())
+            value_action_pred = teacher_action_values_from_batch(model, batch, device).argmax(dim=-1)
+            value_action_correct += int((value_action_pred == labels).sum().item())
+            value_action_total += int(labels.numel())
             pred_np = pred.cpu().numpy()
             target_np = target.cpu().numpy()
             for i in range(len(pred_np)):
@@ -100,6 +116,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
         "FDE": float(np.mean(fdes)),
         "action_accuracy": action_correct / max(1, action_total),
         "teacher_action_accuracy": teacher_action_correct / max(1, teacher_action_total),
+        "value_action_accuracy": value_action_correct / max(1, value_action_total),
     }
 
 
@@ -189,7 +206,6 @@ def save_prediction_artifacts(
     mcts_simulations: int,
     mcts_top_k: int,
     mcts_c_puct: float,
-    mcts_fde_weight: float,
 ) -> None:
     """Save visual artifacts for held-out eval rollouts."""
     if len(dataset) == 0:
@@ -220,7 +236,6 @@ def save_prediction_artifacts(
             mcts_simulations=mcts_simulations,
             mcts_top_k=mcts_top_k,
             mcts_c_puct=mcts_c_puct,
-            mcts_fde_weight=mcts_fde_weight,
         )
         rollouts.append(rollout)
         if preview_image is None:
@@ -247,7 +262,6 @@ def build_rollout_artifact(
     mcts_simulations: int,
     mcts_top_k: int,
     mcts_c_puct: float,
-    mcts_fde_weight: float,
 ) -> tuple[dict, Image.Image]:
     """Build a rollout JSON payload and preview image for one sample."""
     bbox = sample["player_bbox"].unsqueeze(0).to(device)
@@ -277,12 +291,24 @@ def build_rollout_artifact(
                 model=model,
                 visual_features=mcts_visual_features,
                 player_bbox=bbox,
-                target_xy=sample["future_xy"].unsqueeze(0).to(device),
                 simulations=mcts_simulations,
                 top_k=mcts_top_k,
                 c_puct=mcts_c_puct,
-                fde_weight=mcts_fde_weight,
             )
+        if "visual_features" in sample:
+            teacher_visual_features = sample["visual_features"].unsqueeze(0).to(device)
+        else:
+            teacher_visual_features = model.extract_visual_features(sample["frames"].unsqueeze(0).to(device))
+        teacher_action_logits = model.teacher_forced_action_logits(
+            teacher_visual_features,
+            sample["player_bbox"].unsqueeze(0).to(device),
+            sample["future_xy"].unsqueeze(0).to(device),
+        )[0].detach().cpu()
+        teacher_action_values = model.teacher_forced_action_values(
+            teacher_visual_features,
+            sample["player_bbox"].unsqueeze(0).to(device),
+            sample["future_xy"].unsqueeze(0).to(device),
+        )[0].detach().cpu()
     if was_training:
         model.train()
     target = sample["future_xy"].numpy()
@@ -294,19 +320,11 @@ def build_rollout_artifact(
         sample["future_xy"].unsqueeze(0).to(device),
     )[0].detach().cpu()
     action_pred = action_logits.argmax(dim=-1)
-    if "visual_features" in sample:
-        teacher_visual_features = sample["visual_features"].unsqueeze(0).to(device)
-    else:
-        teacher_frames = sample["frames"].unsqueeze(0).to(device)
-        teacher_visual_features = model.extract_visual_features(teacher_frames)
-    teacher_action_logits = model.teacher_forced_action_logits(
-        teacher_visual_features,
-        sample["player_bbox"].unsqueeze(0).to(device),
-        sample["future_xy"].unsqueeze(0).to(device),
-    )[0].detach().cpu()
     teacher_action_pred = teacher_action_logits.argmax(dim=-1)
+    value_action_pred = teacher_action_values.argmax(dim=-1)
     sample_action_accuracy = float((action_pred == action_labels).float().mean().item())
     sample_teacher_action_accuracy = float((teacher_action_pred == action_labels).float().mean().item())
+    sample_value_action_accuracy = float((value_action_pred == action_labels).float().mean().item())
 
     frame = sample["frames"][-1].permute(1, 2, 0).numpy()
     image = Image.fromarray((np.clip(frame, 0.0, 1.0) * 255).astype(np.uint8)).convert("RGB")
@@ -335,10 +353,11 @@ def build_rollout_artifact(
             "points": mcts_points,
             "actions": mcts_result["actions"],
             "action_accuracy": mcts_action_accuracy,
+            "learned_value": float(mcts_result["learned_value"]),
             "root_visits": int(mcts_result["root_visits"]),
             "root_children": mcts_result["root_children"],
-            "ADE": float(mcts_result["ADE"]),
-            "FDE": float(mcts_result["FDE"]),
+            "ADE": ade(mcts_future, target),
+            "FDE": fde(mcts_future, target),
         }
 
     def to_pixels(points: np.ndarray) -> list[tuple[float, float]]:
@@ -391,6 +410,7 @@ def build_rollout_artifact(
             "pred_displacement": float(np.linalg.norm(pred[-1] - input_centers[-1])),
             "action_accuracy": sample_action_accuracy,
             "teacher_action_accuracy": sample_teacher_action_accuracy,
+            "value_action_accuracy": sample_value_action_accuracy,
         },
     }
     if mcts is not None:
@@ -400,7 +420,7 @@ def build_rollout_artifact(
             "simulations": mcts_simulations,
             "top_k": mcts_top_k,
             "c_puct": mcts_c_puct,
-            "fde_weight": mcts_fde_weight,
+            "learned_value": mcts["learned_value"],
             "root_visits": mcts["root_visits"],
             "root_children": mcts["root_children"],
         }
@@ -465,6 +485,10 @@ def train(
     cache_visual_features: bool = False,
     feature_cache_batch_size: int = 4,
     policy_loss_weight: float = 0.05,
+    value_loss_weight: float = 1.0,
+    value_rank_loss_weight: float = 1.0,
+    value_fde_weight: float = 0.5,
+    value_target_scale: float = 10.0,
     model_name: str = "Qwen/Qwen2-VL-2B-Instruct",
     device: str = "cuda",
     log_every: int = 10,
@@ -473,7 +497,6 @@ def train(
     mcts_simulations: int = 0,
     mcts_top_k: int = 8,
     mcts_c_puct: float = 1.5,
-    mcts_fde_weight: float = 0.5,
 ):
     """Run supervised trajectory training on fixed train/eval sequence subsets."""
 
@@ -569,11 +592,14 @@ def train(
         "cache_visual_features": resolved_cache_visual_features,
         "feature_cache_batch_size": feature_cache_batch_size,
         "policy_loss_weight": policy_loss_weight,
+        "value_loss_weight": value_loss_weight,
+        "value_rank_loss_weight": value_rank_loss_weight,
+        "value_fde_weight": value_fde_weight,
+        "value_target_scale": value_target_scale,
         "selected_samples": selected_samples,
         "mcts_simulations": mcts_simulations,
         "mcts_top_k": mcts_top_k,
         "mcts_c_puct": mcts_c_puct,
-        "mcts_fde_weight": mcts_fde_weight,
     }
     Path("sequence_manifest.json").write_text(json.dumps(manifest, indent=2))
 
@@ -629,6 +655,8 @@ def train(
         epoch_loss = 0.0
         epoch_traj_loss = 0.0
         epoch_policy_loss = 0.0
+        epoch_value_loss = 0.0
+        epoch_value_rank_loss = 0.0
         n_batches = 0
         for batch in loader:
             bbox = batch["player_bbox"].to(device)
@@ -637,12 +665,29 @@ def train(
             pred = outputs["future_xy"]
             action_labels = model.action_labels(bbox, target)
             teacher_action_logits = teacher_action_logits_from_batch(model, batch, device)
+            teacher_action_values = teacher_action_values_from_batch(model, batch, device)
+            action_value_targets = model.action_value_targets(
+                bbox,
+                target,
+                terminal_weight=value_fde_weight,
+                target_scale=value_target_scale,
+            )
             trajectory_loss = trajectory_loss_fn(pred, target)
             policy_loss = F.cross_entropy(
                 teacher_action_logits.reshape(-1, teacher_action_logits.shape[-1]),
                 action_labels.reshape(-1),
             )
-            loss = trajectory_loss + policy_loss_weight * policy_loss
+            value_loss = F.mse_loss(teacher_action_values, action_value_targets)
+            value_rank_loss = F.cross_entropy(
+                teacher_action_values.reshape(-1, teacher_action_values.shape[-1]),
+                action_labels.reshape(-1),
+            )
+            loss = (
+                trajectory_loss
+                + policy_loss_weight * policy_loss
+                + value_loss_weight * value_loss
+                + value_rank_loss_weight * value_rank_loss
+            )
 
             optimizer.zero_grad()
             loss.backward()
@@ -651,11 +696,15 @@ def train(
             epoch_loss += loss.item()
             epoch_traj_loss += trajectory_loss.item()
             epoch_policy_loss += policy_loss.item()
+            epoch_value_loss += value_loss.item()
+            epoch_value_rank_loss += value_rank_loss.item()
             n_batches += 1
 
         avg_loss = epoch_loss / max(n_batches, 1)
         avg_traj_loss = epoch_traj_loss / max(n_batches, 1)
         avg_policy_loss = epoch_policy_loss / max(n_batches, 1)
+        avg_value_loss = epoch_value_loss / max(n_batches, 1)
+        avg_value_rank_loss = epoch_value_rank_loss / max(n_batches, 1)
 
         if epoch % log_every == 0 or epoch == 1 or epoch == epochs:
             train_metrics = evaluate(model, loader, device)
@@ -663,13 +712,16 @@ def train(
             elapsed = time.time() - start
             print(
                 f"Epoch {epoch:4d} | loss={avg_loss:.6f} | "
-                f"traj={avg_traj_loss:.6f} policy={avg_policy_loss:.6f} | "
+                f"traj={avg_traj_loss:.6f} policy={avg_policy_loss:.6f} "
+                f"value={avg_value_loss:.6f} value_rank={avg_value_rank_loss:.6f} | "
                 f"train_ADE={train_metrics['ADE']:.6f} train_FDE={train_metrics['FDE']:.6f} | "
                 f"train_act={train_metrics['action_accuracy']:.3f} "
-                f"train_teacher_act={train_metrics['teacher_action_accuracy']:.3f} | "
+                f"train_teacher_act={train_metrics['teacher_action_accuracy']:.3f} "
+                f"train_value_act={train_metrics['value_action_accuracy']:.3f} | "
                 f"eval_ADE={eval_metrics['ADE']:.6f} eval_FDE={eval_metrics['FDE']:.6f} | "
                 f"eval_act={eval_metrics['action_accuracy']:.3f} "
-                f"eval_teacher_act={eval_metrics['teacher_action_accuracy']:.3f} | "
+                f"eval_teacher_act={eval_metrics['teacher_action_accuracy']:.3f} "
+                f"eval_value_act={eval_metrics['value_action_accuracy']:.3f} | "
                 f"{elapsed:.1f}s"
             )
             history.append({
@@ -677,14 +729,18 @@ def train(
                 "loss": avg_loss,
                 "trajectory_loss": avg_traj_loss,
                 "policy_loss": avg_policy_loss,
+                "value_loss": avg_value_loss,
+                "value_rank_loss": avg_value_rank_loss,
                 "train_ADE": train_metrics["ADE"],
                 "train_FDE": train_metrics["FDE"],
                 "train_action_accuracy": train_metrics["action_accuracy"],
                 "train_teacher_action_accuracy": train_metrics["teacher_action_accuracy"],
+                "train_value_action_accuracy": train_metrics["value_action_accuracy"],
                 "eval_ADE": eval_metrics["ADE"],
                 "eval_FDE": eval_metrics["FDE"],
                 "eval_action_accuracy": eval_metrics["action_accuracy"],
                 "eval_teacher_action_accuracy": eval_metrics["teacher_action_accuracy"],
+                "eval_value_action_accuracy": eval_metrics["value_action_accuracy"],
             })
 
     # Final eval
@@ -699,15 +755,19 @@ def train(
         "eval_action_accuracy": final_eval["action_accuracy"],
         "train_teacher_action_accuracy": final_train["teacher_action_accuracy"],
         "eval_teacher_action_accuracy": final_eval["teacher_action_accuracy"],
+        "train_value_action_accuracy": final_train["value_action_accuracy"],
+        "eval_value_action_accuracy": final_eval["value_action_accuracy"],
     }
     print(
         "\nFinal: "
         f"train_ADE={final['train_ADE']:.6f} train_FDE={final['train_FDE']:.6f} | "
         f"train_act={final['train_action_accuracy']:.3f} "
-        f"train_teacher_act={final['train_teacher_action_accuracy']:.3f} | "
+        f"train_teacher_act={final['train_teacher_action_accuracy']:.3f} "
+        f"train_value_act={final['train_value_action_accuracy']:.3f} | "
         f"eval_ADE={final['eval_ADE']:.6f} eval_FDE={final['eval_FDE']:.6f} | "
         f"eval_act={final['eval_action_accuracy']:.3f} "
-        f"eval_teacher_act={final['eval_teacher_action_accuracy']:.3f}"
+        f"eval_teacher_act={final['eval_teacher_action_accuracy']:.3f} "
+        f"eval_value_act={final['eval_value_action_accuracy']:.3f}"
     )
     save_prediction_artifacts(
         model=model,
@@ -721,7 +781,6 @@ def train(
         mcts_simulations=mcts_simulations,
         mcts_top_k=mcts_top_k,
         mcts_c_puct=mcts_c_puct,
-        mcts_fde_weight=mcts_fde_weight,
     )
 
     # Save history
@@ -734,6 +793,7 @@ def train(
         {"visual_proj": model.visual_proj.state_dict(),
          "step_embedding": model.step_embedding.state_dict(),
          "head": model.head.state_dict(),
+         "value_head": model.value_head.state_dict(),
          "action_codebook": model.action_codebook.cpu(),
          "action_stride": model.action_stride},
         "trajectory_head.pt",
@@ -767,10 +827,13 @@ if __name__ == "__main__":
     parser.add_argument("--cache-visual-features", action="store_true")
     parser.add_argument("--feature-cache-batch-size", type=int, default=4)
     parser.add_argument("--policy-loss-weight", type=float, default=0.05)
+    parser.add_argument("--value-loss-weight", type=float, default=1.0)
+    parser.add_argument("--value-rank-loss-weight", type=float, default=1.0)
+    parser.add_argument("--value-fde-weight", type=float, default=0.5)
+    parser.add_argument("--value-target-scale", type=float, default=10.0)
     parser.add_argument("--mcts-simulations", type=int, default=0)
     parser.add_argument("--mcts-top-k", type=int, default=8)
     parser.add_argument("--mcts-c-puct", type=float, default=1.5)
-    parser.add_argument("--mcts-fde-weight", type=float, default=0.5)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -797,9 +860,12 @@ if __name__ == "__main__":
         cache_visual_features=args.cache_visual_features,
         feature_cache_batch_size=args.feature_cache_batch_size,
         policy_loss_weight=args.policy_loss_weight,
+        value_loss_weight=args.value_loss_weight,
+        value_rank_loss_weight=args.value_rank_loss_weight,
+        value_fde_weight=args.value_fde_weight,
+        value_target_scale=args.value_target_scale,
         mcts_simulations=args.mcts_simulations,
         mcts_top_k=args.mcts_top_k,
         mcts_c_puct=args.mcts_c_puct,
-        mcts_fde_weight=args.mcts_fde_weight,
         device=args.device,
     )

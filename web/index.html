@@ -157,6 +157,10 @@
                 <dd id="rollout-action" class="mt-1 font-medium text-white">--</dd>
               </div>
               <div>
+                <dt class="text-zinc-500">Value act</dt>
+                <dd id="value-action" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
                 <dt class="text-zinc-500">MCTS ADE</dt>
                 <dd id="mcts-ade" class="mt-1 font-medium text-white">--</dd>
               </div>
@@ -171,6 +175,10 @@
               <div>
                 <dt class="text-zinc-500">MCTS sims</dt>
                 <dd id="mcts-sims" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Search val</dt>
+                <dd id="mcts-value" class="mt-1 font-medium text-white">--</dd>
               </div>
             </dl>
           </section>
@@ -431,10 +439,12 @@
         setText("pred-move", number(metrics.pred_displacement));
         setText("action-stride", data?.action_stride ?? "--");
         setText("rollout-action", number(metrics.action_accuracy));
+        setText("value-action", number(metrics.value_action_accuracy));
         setText("mcts-ade", number(metrics.mcts_ADE));
         setText("mcts-action", number(metrics.mcts_action_accuracy));
         setText("mcts-move", number(metrics.mcts_displacement));
         setText("mcts-sims", data?.mcts?.simulations ?? "--");
+        setText("mcts-value", number(data?.mcts?.learned_value));
       }
 
       async function configureRollout(data) {
