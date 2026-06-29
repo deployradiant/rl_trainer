@@ -58,24 +58,24 @@ def parse_seqinfo(content: str) -> dict:
     return info
 
 
-def parse_gt(content: str) -> dict[int, dict[int, tuple[int, int, int, int]]]:
+def parse_gt(content: str) -> dict[int, dict[int, tuple[float, float, float, float]]]:
     """Parse gt.txt MOT format: frame, track_id, x, y, w, h, conf, -1, -1, -1.
 
     Returns: {track_id: {frame: (x, y, w, h)}}
     """
-    tracks: dict[int, dict[int, tuple[int, int, int, int]]] = {}
+    tracks: dict[int, dict[int, tuple[float, float, float, float]]] = {}
     for line in content.splitlines():
         parts = line.split(",")
         if len(parts) < 6:
             continue
         frame = int(parts[0])
         track_id = int(parts[1])
-        x, y, w, h = int(parts[2]), int(parts[3]), int(parts[4]), int(parts[5])
+        x, y, w, h = float(parts[2]), float(parts[3]), float(parts[4]), float(parts[5])
         tracks.setdefault(track_id, {})[frame] = (x, y, w, h)
     return tracks
 
 
-def bbox_center(bbox: tuple[int, int, int, int]) -> tuple[float, float]:
+def bbox_center(bbox: tuple[float, float, float, float]) -> tuple[float, float]:
     x, y, w, h = bbox
     return (x + w / 2, y + h / 2)
 
@@ -235,10 +235,12 @@ class SoccerNetTrackingDataset(Dataset):
         if self._zip is not None:
             prefix = f"{self.split}/{self.sequence}/img1"
             img_data = self._zip.read(f"{prefix}/{frame_idx:06d}.jpg")
-            return Image.open(io.BytesIO(img_data)).convert("RGB")
-        else:
-            path = self._seq_dir / "img1" / f"{frame_idx:06d}.jpg"
-            return Image.open(path).convert("RGB")
+            with Image.open(io.BytesIO(img_data)) as image:
+                return image.convert("RGB")
+
+        path = self._seq_dir / "img1" / f"{frame_idx:06d}.jpg"
+        with Image.open(path) as image:
+            return image.convert("RGB")
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -345,6 +347,8 @@ class MultiSequenceSoccerNetTrackingDataset(Dataset):
         return self.cumulative_lengths[-1] if self.cumulative_lengths else 0
 
     def _locate(self, idx: int) -> tuple[int, int]:
+        if idx < 0 or idx >= len(self):
+            raise IndexError(idx)
         dataset_idx = bisect.bisect_right(self.cumulative_lengths, idx)
         start = 0 if dataset_idx == 0 else self.cumulative_lengths[dataset_idx - 1]
         return dataset_idx, idx - start
