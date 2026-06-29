@@ -188,6 +188,7 @@
       let frameIndex = 0;
       let playing = false;
       let playTimer = null;
+      let rolloutLoadToken = 0;
 
       function number(value, digits = 4) {
         return Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "--";
@@ -228,6 +229,18 @@
         if (!selectedStillExists) selectedRolloutId = rollouts.length ? rolloutId(rollouts[0]) : null;
         if (selectedRolloutId) select.value = selectedRolloutId;
         select.disabled = rollouts.length <= 1;
+      }
+
+      function showRolloutMessage(message) {
+        const empty = $("rollout-empty");
+        empty.textContent = message;
+        empty.classList.remove("hidden");
+      }
+
+      function hideRolloutMessage() {
+        const empty = $("rollout-empty");
+        empty.textContent = "";
+        empty.classList.add("hidden");
       }
 
       function resizeCanvas(canvas) {
@@ -344,14 +357,49 @@
         }, 1000 / fps);
       }
 
-      function preloadFrames(updatedAt) {
-        frameImages = rollout.frame_numbers.map((frameNumber) => {
-          const image = document.createElement("img");
-          image.decoding = "async";
-          image.loading = "eager";
-          image.onload = () => drawRolloutFrame();
-          image.src = `/frames/${encodeURIComponent(rollout.sequence)}/${frameNumber}.jpg?v=${updatedAt || Date.now()}`;
-          return image;
+      function frameUrl(frameNumber, updatedAt) {
+        return `/frames/${encodeURIComponent(rollout.sequence)}/${frameNumber}.jpg?v=${updatedAt || Date.now()}`;
+      }
+
+      function frameIsLoaded(image) {
+        return Boolean(image?.complete && image.naturalWidth);
+      }
+
+      function createFrameImage(frameNumber, updatedAt, token) {
+        const image = document.createElement("img");
+        image.decoding = "async";
+        image.loading = "eager";
+        image.addEventListener("load", () => {
+          if (token === rolloutLoadToken) drawRolloutFrame();
+        });
+        image.addEventListener("error", () => {
+          if (token === rolloutLoadToken) showRolloutMessage(`Could not load frame ${frameNumber}.`);
+        });
+        image.src = frameUrl(frameNumber, updatedAt);
+        return image;
+      }
+
+      async function waitForFrame(image) {
+        if (!frameIsLoaded(image)) {
+          if (image?.complete && !image.naturalWidth) throw new Error("Frame image failed to load.");
+          await new Promise((resolve, reject) => {
+            image.addEventListener("load", () => resolve(), { once: true });
+            image.addEventListener("error", () => reject(new Error("Frame image failed to load.")), { once: true });
+          });
+        }
+        if (image.decode) await image.decode();
+      }
+
+      function preloadFirstFrame(updatedAt, token) {
+        frameImages = new Array(rollout.frame_numbers.length);
+        frameImages[0] = createFrameImage(rollout.frame_numbers[0], updatedAt, token);
+        return frameImages[0];
+      }
+
+      function preloadRemainingFrames(updatedAt, token) {
+        rollout.frame_numbers.forEach((frameNumber, index) => {
+          if (index === 0 || token !== rolloutLoadToken) return;
+          frameImages[index] = createFrameImage(frameNumber, updatedAt, token);
         });
       }
 
@@ -365,18 +413,28 @@
         setText("rollout-action", number(metrics.action_accuracy));
       }
 
-      function configureRollout(data) {
+      async function configureRollout(data) {
+        const token = ++rolloutLoadToken;
         rollout = data;
         frameIndex = 0;
         setPlaying(false);
-        $("rollout-empty").classList.add("hidden");
+        showRolloutMessage("Loading first frame...");
         $("frame-scrubber").max = Math.max(0, rollout.frame_numbers.length - 1);
         $("frame-scrubber").value = 0;
         const adeLabel = rollout.metrics?.ADE != null ? ` / ADE ${number(rollout.metrics.ADE)}` : "";
         $("rollout-meta").textContent = `${rollout.sequence} / track ${rollout.track_id} / ${rollout.frame_numbers.length} frames${adeLabel}`;
         updateRolloutStats(rollout);
-        preloadFrames(data.updated_at);
+        const firstFrame = preloadFirstFrame(data.updated_at, token);
         drawRolloutFrame();
+        try {
+          await waitForFrame(firstFrame);
+          if (token !== rolloutLoadToken) return;
+          hideRolloutMessage();
+          drawRolloutFrame();
+          preloadRemainingFrames(data.updated_at, token);
+        } catch (error) {
+          if (token === rolloutLoadToken) showRolloutMessage(error.message);
+        }
       }
 
       function drawHistory(history) {
@@ -485,14 +543,14 @@
             }
           } else {
             rollout = null;
-            $("rollout-empty").classList.remove("hidden");
+            showRolloutMessage("No rollout artifact found.");
           }
 
           drawHistory(history);
         } catch (error) {
           $("status").textContent = "Load failed";
           $("status").className = "rounded-full border border-red-400/40 bg-red-400/10 px-3 py-1 text-red-100";
-          $("rollout-empty").textContent = error.message;
+          showRolloutMessage(error.message);
           drawHistory([]);
         }
       }
