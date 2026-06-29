@@ -9,7 +9,8 @@ The moves are then overlayed onto the result of the game.
 This starts with one player.
 
 See [docs/training_plan.md](docs/training_plan.md) for the current working plan
-and minimal initial training goal.
+and minimal initial training goal. Small documentation-only commits are useful
+for verifying the local Git workflow before larger training changes.
 
 Initial real-data run: deterministic SoccerNet `train` split sequence subsets
 with seed `7`, using `10%` of sequences for training and `2%` for held-out eval.
