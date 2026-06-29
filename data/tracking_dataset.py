@@ -128,6 +128,30 @@ def choose_sequence_subsets(
     return sorted(shuffled[:n_train]), sorted(shuffled[n_train:n_train + n_eval])
 
 
+def choose_sequence_subsets_by_count(
+    sequences: list[str],
+    train_count: int,
+    eval_count: int,
+    seed: int,
+) -> tuple[list[str], list[str]]:
+    """Pick deterministic, non-overlapping train/eval sequence counts."""
+    if not sequences:
+        raise ValueError("Cannot choose subsets from an empty sequence list")
+    if train_count <= 0 or eval_count <= 0:
+        raise ValueError("train_count and eval_count must be positive")
+    if train_count + eval_count > len(sequences):
+        raise ValueError(
+            f"Need at least {train_count + eval_count} sequences for train/eval subsets, "
+            f"found {len(sequences)}"
+        )
+
+    import random
+
+    shuffled = list(sequences)
+    random.Random(seed).shuffle(shuffled)
+    return sorted(shuffled[:train_count]), sorted(shuffled[train_count:train_count + eval_count])
+
+
 class SoccerNetTrackingDataset(Dataset):
     """Player trajectory prediction dataset from SoccerNet tracking data.
 

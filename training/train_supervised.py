@@ -8,12 +8,14 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from PIL import Image, ImageDraw
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from data.tracking_dataset import (
     MultiSequenceSoccerNetTrackingDataset,
     choose_sequence_subsets,
+    choose_sequence_subsets_by_count,
     list_sequences,
 )
 from models.qwen_football import QwenFootballModel
@@ -29,28 +31,54 @@ def fde(pred: np.ndarray, target: np.ndarray) -> float:
     return float(np.linalg.norm(pred[-1] - target[-1]))
 
 
-def predict_from_batch(model: nn.Module, batch: dict, device: str) -> torch.Tensor:
+def outputs_from_batch(
+    model: nn.Module,
+    batch: dict,
+    device: str,
+    greedy: bool = False,
+) -> dict[str, torch.Tensor]:
     bbox = batch["player_bbox"].to(device)
     if "visual_features" in batch:
         visual_features = batch["visual_features"].to(device)
-        return model.predict_from_visual_features(visual_features, bbox)
+        return model.predict_from_visual_features(
+            visual_features,
+            bbox,
+            return_outputs=True,
+            greedy=greedy,
+        )
     frames = batch["frames"].to(device)
-    return model(frames, bbox)
+    return model.forward_outputs(frames, bbox, greedy=greedy)
+
+
+def predict_from_batch(model: nn.Module, batch: dict, device: str) -> torch.Tensor:
+    return outputs_from_batch(model, batch, device, greedy=True)["future_xy"]
 
 
 def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
     model.eval()
     ades, fdes = [], []
+    action_correct = 0
+    action_total = 0
     with torch.no_grad():
         for batch in loader:
+            bbox = batch["player_bbox"].to(device)
             target = batch["future_xy"].to(device)
-            pred = predict_from_batch(model, batch, device)
+            outputs = outputs_from_batch(model, batch, device, greedy=True)
+            pred = outputs["future_xy"]
+            labels = model.action_labels(bbox, target)
+            action_pred = outputs["action_logits"].argmax(dim=-1)
+            action_correct += int((action_pred == labels).sum().item())
+            action_total += int(labels.numel())
             pred_np = pred.cpu().numpy()
             target_np = target.cpu().numpy()
             for i in range(len(pred_np)):
                 ades.append(ade(pred_np[i], target_np[i]))
                 fdes.append(fde(pred_np[i], target_np[i]))
-    return {"ADE": float(np.mean(ades)), "FDE": float(np.mean(fdes))}
+    return {
+        "ADE": float(np.mean(ades)),
+        "FDE": float(np.mean(fdes)),
+        "action_accuracy": action_correct / max(1, action_total),
+    }
 
 
 def select_sample_indices(
@@ -76,33 +104,55 @@ def select_sample_indices(
 class CachedFeatureDataset(Dataset):
     """Dataset wrapper that attaches frozen Qwen visual features to each sample."""
 
-    def __init__(self, dataset: Dataset, visual_features: torch.Tensor):
+    def __init__(self, dataset: Dataset, visual_features: torch.Tensor, samples: list[dict]):
         self.dataset = dataset
         self.visual_features = visual_features
+        self.samples = samples
 
     def __len__(self) -> int:
-        return len(self.dataset)
+        return len(self.samples)
 
     def __getitem__(self, idx: int) -> dict:
+        sample = dict(self.samples[idx])
+        sample["visual_features"] = self.visual_features[idx]
+        return sample
+
+    def full_sample(self, idx: int) -> dict:
         sample = dict(self.dataset[idx])
         sample["visual_features"] = self.visual_features[idx]
         return sample
 
 
-def cache_dataset_visual_features(model: nn.Module, dataset: Dataset, device: str) -> CachedFeatureDataset:
+def cache_dataset_visual_features(
+    model: nn.Module,
+    dataset: Dataset,
+    device: str,
+    batch_size: int,
+) -> CachedFeatureDataset:
     """Precompute frozen Qwen features for small deterministic overfit runs."""
     features = []
+    cached_samples = []
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     was_training = model.training
     model.eval()
     with torch.no_grad():
-        for idx in range(len(dataset)):
-            sample = dataset[idx]
-            frames = sample["frames"].unsqueeze(0).to(device)
-            visual_features = model.extract_visual_features(frames)[0].cpu()
+        for batch_idx, batch in enumerate(loader, start=1):
+            frames = batch["frames"].to(device)
+            visual_features = model.extract_visual_features(frames).cpu()
             features.append(visual_features)
+            for i in range(visual_features.shape[0]):
+                cached_samples.append({
+                    "player_bbox": batch["player_bbox"][i].cpu(),
+                    "future_xy": batch["future_xy"][i].cpu(),
+                    "sequence": batch["sequence"][i],
+                    "track_id": int(batch["track_id"][i]),
+                    "start_frame": int(batch["start_frame"][i]),
+                })
+            if batch_idx == 1 or batch_idx == len(loader) or batch_idx % 10 == 0:
+                print(f"Cached visual feature batch {batch_idx}/{len(loader)}")
     if was_training:
         model.train()
-    return CachedFeatureDataset(dataset, torch.stack(features))
+    return CachedFeatureDataset(dataset, torch.cat(features, dim=0), cached_samples)
 
 
 def save_prediction_artifacts(
@@ -119,24 +169,39 @@ def save_prediction_artifacts(
     if len(dataset) == 0:
         return
 
-    sample = dataset[0]
+    if hasattr(dataset, "full_sample"):
+        sample = dataset.full_sample(0)
+    else:
+        sample = dataset[0]
     bbox = sample["player_bbox"].unsqueeze(0).to(device)
     was_training = model.training
     model.eval()
     with torch.no_grad():
         if "visual_features" in sample:
             visual_features = sample["visual_features"].unsqueeze(0).to(device)
-            pred_tensor = model.predict_from_visual_features(visual_features, bbox)
+            outputs = model.predict_from_visual_features(
+                visual_features,
+                bbox,
+                return_outputs=True,
+                greedy=True,
+            )
         else:
             frames = sample["frames"].unsqueeze(0).to(device)
-            pred_tensor = model(frames, bbox)
-        pred = pred_tensor[0].detach().cpu().numpy()
+            outputs = model.forward_outputs(frames, bbox, greedy=True)
+        pred = outputs["future_xy"][0].detach().cpu().numpy()
+        action_logits = outputs["action_logits"][0].detach().cpu()
     if was_training:
         model.train()
     target = sample["future_xy"].numpy()
     input_bboxes = sample["player_bbox"].numpy()
     sample_ade = ade(pred, target)
     sample_fde = fde(pred, target)
+    action_labels = model.action_labels(
+        sample["player_bbox"].unsqueeze(0).to(device),
+        sample["future_xy"].unsqueeze(0).to(device),
+    )[0].detach().cpu()
+    action_pred = action_logits.argmax(dim=-1)
+    sample_action_accuracy = float((action_pred == action_labels).float().mean().item())
 
     frame = sample["frames"][-1].permute(1, 2, 0).numpy()
     image = Image.fromarray((np.clip(frame, 0.0, 1.0) * 255).astype(np.uint8)).convert("RGB")
@@ -187,6 +252,8 @@ def save_prediction_artifacts(
         "start_frame": start_frame,
         "input_frames": input_frames,
         "horizon": horizon,
+        "action_stride": getattr(model, "action_stride", 1),
+        "action_count": int(getattr(model, "action_codebook", torch.empty(0)).shape[0]),
         "fps": 25,
         "current_index": input_frames - 1,
         "frame_numbers": input_frame_numbers + future_frame_numbers,
@@ -200,6 +267,7 @@ def save_prediction_artifacts(
             "FDE": sample_fde,
             "actual_displacement": float(np.linalg.norm(target[-1] - input_centers[-1])),
             "pred_displacement": float(np.linalg.norm(pred[-1] - input_centers[-1])),
+            "action_accuracy": sample_action_accuracy,
         },
     }
     rollout_out = Path(rollout_path)
@@ -243,6 +311,7 @@ def train(
     split: str = "train",
     input_frames: int = 5,
     horizon: int = 25,
+    action_stride: int = 5,
     stride: int = 50,
     image_size: int = 224,
     max_frames: int = 250,
@@ -251,10 +320,14 @@ def train(
     lr: float = 1e-3,
     train_fraction: float = 0.10,
     eval_fraction: float = 0.02,
+    train_sequence_count: int = 0,
+    eval_sequence_count: int = 0,
     seed: int = 7,
     overfit_samples: int = 0,
     sample_selection: str = "first",
     cache_visual_features: bool = False,
+    feature_cache_batch_size: int = 4,
+    policy_loss_weight: float = 0.05,
     model_name: str = "Qwen/Qwen2-VL-2B-Instruct",
     device: str = "cuda",
     log_every: int = 10,
@@ -274,12 +347,20 @@ def train(
         all_sequences = [sequence]
     else:
         all_sequences = list_sequences(data_root, split)
-        train_sequences, eval_sequences = choose_sequence_subsets(
-            all_sequences,
-            train_fraction=train_fraction,
-            eval_fraction=eval_fraction,
-            seed=seed,
-        )
+        if train_sequence_count or eval_sequence_count:
+            train_sequences, eval_sequences = choose_sequence_subsets_by_count(
+                all_sequences,
+                train_count=train_sequence_count or 1,
+                eval_count=eval_sequence_count or 1,
+                seed=seed,
+            )
+        else:
+            train_sequences, eval_sequences = choose_sequence_subsets(
+                all_sequences,
+                train_fraction=train_fraction,
+                eval_fraction=eval_fraction,
+                seed=seed,
+            )
 
     print(
         f"Sequence split: {len(train_sequences)} train / {len(eval_sequences)} eval "
@@ -336,12 +417,17 @@ def train(
         "eval_sequences": eval_sequences,
         "input_frames": input_frames,
         "horizon": horizon,
+        "action_stride": action_stride,
         "stride": stride,
         "image_size": image_size,
         "max_frames": max_frames,
+        "train_sequence_count": train_sequence_count,
+        "eval_sequence_count": eval_sequence_count,
         "overfit_samples": overfit_samples,
         "sample_selection": sample_selection,
         "cache_visual_features": resolved_cache_visual_features,
+        "feature_cache_batch_size": feature_cache_batch_size,
+        "policy_loss_weight": policy_loss_weight,
         "selected_samples": selected_samples,
     }
     Path("sequence_manifest.json").write_text(json.dumps(manifest, indent=2))
@@ -350,6 +436,7 @@ def train(
         model_name=model_name,
         horizon=horizon,
         input_frames=input_frames,
+        action_stride=action_stride,
         freeze_backbone=True,
     )
     model.to(device)
@@ -362,8 +449,18 @@ def train(
 
     if resolved_cache_visual_features:
         print("Caching frozen Qwen visual features for this small training set...")
-        train_dataset = cache_dataset_visual_features(model, train_dataset, device)
-        eval_dataset = cache_dataset_visual_features(model, eval_dataset, device)
+        train_dataset = cache_dataset_visual_features(
+            model,
+            train_dataset,
+            device,
+            batch_size=feature_cache_batch_size,
+        )
+        eval_dataset = cache_dataset_visual_features(
+            model,
+            eval_dataset,
+            device,
+            batch_size=feature_cache_batch_size,
+        )
 
     loader_generator = torch.Generator()
     loader_generator.manual_seed(seed)
@@ -377,7 +474,7 @@ def train(
     eval_loader = DataLoader(eval_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
     optimizer = torch.optim.AdamW(trainable, lr=lr)
-    loss_fn = nn.SmoothL1Loss()
+    trajectory_loss_fn = nn.SmoothL1Loss()
 
     history = []
     start = time.time()
@@ -385,20 +482,34 @@ def train(
     for epoch in range(1, epochs + 1):
         model.train()
         epoch_loss = 0.0
+        epoch_traj_loss = 0.0
+        epoch_policy_loss = 0.0
         n_batches = 0
         for batch in loader:
+            bbox = batch["player_bbox"].to(device)
             target = batch["future_xy"].to(device)
-            pred = predict_from_batch(model, batch, device)
-            loss = loss_fn(pred, target)
+            outputs = outputs_from_batch(model, batch, device)
+            pred = outputs["future_xy"]
+            action_labels = model.action_labels(bbox, target)
+            trajectory_loss = trajectory_loss_fn(pred, target)
+            policy_loss = F.cross_entropy(
+                outputs["action_logits"].reshape(-1, outputs["action_logits"].shape[-1]),
+                action_labels.reshape(-1),
+            )
+            loss = trajectory_loss + policy_loss_weight * policy_loss
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
             epoch_loss += loss.item()
+            epoch_traj_loss += trajectory_loss.item()
+            epoch_policy_loss += policy_loss.item()
             n_batches += 1
 
         avg_loss = epoch_loss / max(n_batches, 1)
+        avg_traj_loss = epoch_traj_loss / max(n_batches, 1)
+        avg_policy_loss = epoch_policy_loss / max(n_batches, 1)
 
         if epoch % log_every == 0 or epoch == 1 or epoch == epochs:
             train_metrics = evaluate(model, loader, device)
@@ -406,17 +517,24 @@ def train(
             elapsed = time.time() - start
             print(
                 f"Epoch {epoch:4d} | loss={avg_loss:.6f} | "
+                f"traj={avg_traj_loss:.6f} policy={avg_policy_loss:.6f} | "
                 f"train_ADE={train_metrics['ADE']:.6f} train_FDE={train_metrics['FDE']:.6f} | "
+                f"train_act={train_metrics['action_accuracy']:.3f} | "
                 f"eval_ADE={eval_metrics['ADE']:.6f} eval_FDE={eval_metrics['FDE']:.6f} | "
+                f"eval_act={eval_metrics['action_accuracy']:.3f} | "
                 f"{elapsed:.1f}s"
             )
             history.append({
                 "epoch": epoch,
                 "loss": avg_loss,
+                "trajectory_loss": avg_traj_loss,
+                "policy_loss": avg_policy_loss,
                 "train_ADE": train_metrics["ADE"],
                 "train_FDE": train_metrics["FDE"],
+                "train_action_accuracy": train_metrics["action_accuracy"],
                 "eval_ADE": eval_metrics["ADE"],
                 "eval_FDE": eval_metrics["FDE"],
+                "eval_action_accuracy": eval_metrics["action_accuracy"],
             })
 
     # Final eval
@@ -427,11 +545,15 @@ def train(
         "train_FDE": final_train["FDE"],
         "eval_ADE": final_eval["ADE"],
         "eval_FDE": final_eval["FDE"],
+        "train_action_accuracy": final_train["action_accuracy"],
+        "eval_action_accuracy": final_eval["action_accuracy"],
     }
     print(
         "\nFinal: "
         f"train_ADE={final['train_ADE']:.6f} train_FDE={final['train_FDE']:.6f} | "
-        f"eval_ADE={final['eval_ADE']:.6f} eval_FDE={final['eval_FDE']:.6f}"
+        f"train_act={final['train_action_accuracy']:.3f} | "
+        f"eval_ADE={final['eval_ADE']:.6f} eval_FDE={final['eval_FDE']:.6f} | "
+        f"eval_act={final['eval_action_accuracy']:.3f}"
     )
     save_prediction_artifacts(
         model=model,
@@ -452,7 +574,9 @@ def train(
     # Save model head
     torch.save(
         {"visual_proj": model.visual_proj.state_dict(),
-         "head": model.head.state_dict()},
+         "head": model.head.state_dict(),
+         "action_codebook": model.action_codebook.cpu(),
+         "action_stride": model.action_stride},
         "trajectory_head.pt",
     )
     print("Head weights saved to trajectory_head.pt")
@@ -467,6 +591,7 @@ if __name__ == "__main__":
     parser.add_argument("--split", default="train")
     parser.add_argument("--input-frames", type=int, default=5)
     parser.add_argument("--horizon", type=int, default=25)
+    parser.add_argument("--action-stride", type=int, default=5)
     parser.add_argument("--stride", type=int, default=50)
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--max-frames", type=int, default=250)
@@ -475,10 +600,14 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--train-fraction", type=float, default=0.10)
     parser.add_argument("--eval-fraction", type=float, default=0.02)
+    parser.add_argument("--train-sequence-count", type=int, default=0)
+    parser.add_argument("--eval-sequence-count", type=int, default=0)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--overfit-samples", type=int, default=0)
     parser.add_argument("--sample-selection", default="first", choices=["first", "max_motion"])
     parser.add_argument("--cache-visual-features", action="store_true")
+    parser.add_argument("--feature-cache-batch-size", type=int, default=4)
+    parser.add_argument("--policy-loss-weight", type=float, default=0.05)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -488,6 +617,7 @@ if __name__ == "__main__":
         split=args.split,
         input_frames=args.input_frames,
         horizon=args.horizon,
+        action_stride=args.action_stride,
         stride=args.stride,
         image_size=args.image_size,
         max_frames=args.max_frames,
@@ -496,9 +626,13 @@ if __name__ == "__main__":
         lr=args.lr,
         train_fraction=args.train_fraction,
         eval_fraction=args.eval_fraction,
+        train_sequence_count=args.train_sequence_count,
+        eval_sequence_count=args.eval_sequence_count,
         seed=args.seed,
         overfit_samples=args.overfit_samples,
         sample_selection=args.sample_selection,
         cache_visual_features=args.cache_visual_features,
+        feature_cache_batch_size=args.feature_cache_batch_size,
+        policy_loss_weight=args.policy_loss_weight,
         device=args.device,
     )

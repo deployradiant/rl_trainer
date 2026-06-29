@@ -146,6 +146,14 @@
                 <dt class="text-zinc-500">Pred move</dt>
                 <dd id="pred-move" class="mt-1 font-medium text-white">--</dd>
               </div>
+              <div>
+                <dt class="text-zinc-500">Action stride</dt>
+                <dd id="action-stride" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Rollout act</dt>
+                <dd id="rollout-action" class="mt-1 font-medium text-white">--</dd>
+              </div>
             </dl>
           </section>
 
@@ -421,6 +429,8 @@
           setText("rollout-ade", number(rolloutMetrics.ADE));
           setText("actual-move", number(rolloutMetrics.actual_displacement));
           setText("pred-move", number(rolloutMetrics.pred_displacement));
+          setText("action-stride", rolloutData.action_stride ?? manifest.action_stride);
+          setText("rollout-action", number(rolloutMetrics.action_accuracy));
           setText("epoch-label", latest.epoch ? `Epoch ${latest.epoch}` : "--");
 
           $("train-sequences").innerHTML = (manifest.train_sequences || []).map((seq) => chip(seq, "train")).join("");
