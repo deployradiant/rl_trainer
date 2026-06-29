@@ -42,6 +42,7 @@
                 <select id="sequence-select" class="h-9 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-white" aria-label="Select rollout sequence"></select>
                 <span class="flex items-center gap-1.5 text-emerald-300"><span class="h-2.5 w-2.5 rounded-full bg-emerald-400"></span>Actual</span>
                 <span class="flex items-center gap-1.5 text-red-300"><span class="h-2.5 w-2.5 rounded-full bg-red-400"></span>Predicted</span>
+                <span class="flex items-center gap-1.5 text-sky-300"><span class="h-2.5 w-2.5 rounded-full bg-sky-400"></span>MCTS</span>
                 <span class="flex items-center gap-1.5 text-white"><span class="h-2.5 w-2.5 rounded-sm bg-white"></span>Box</span>
               </div>
             </div>
@@ -154,6 +155,22 @@
               <div>
                 <dt class="text-zinc-500">Rollout act</dt>
                 <dd id="rollout-action" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">MCTS ADE</dt>
+                <dd id="mcts-ade" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">MCTS act</dt>
+                <dd id="mcts-action" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">MCTS move</dt>
+                <dd id="mcts-move" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">MCTS sims</dt>
+                <dd id="mcts-sims" class="mt-1 font-medium text-white">--</dd>
               </div>
             </dl>
           </section>
@@ -326,6 +343,10 @@
           const predPoints = rollout.pred_xy.slice(0, predCount);
           drawLine(ctx, predPoints, imageRect, "#fb7185", 4);
           if (predPoints.length) drawPoint(ctx, predPoints[predPoints.length - 1], imageRect, "#fda4af", 5);
+
+          const mctsPoints = rollout.mcts_xy?.slice(0, predCount) || [];
+          drawLine(ctx, mctsPoints, imageRect, "#38bdf8", 4);
+          if (mctsPoints.length) drawPoint(ctx, mctsPoints[mctsPoints.length - 1], imageRect, "#7dd3fc", 5);
         }
 
         if (frameIndex < rollout.input_bboxes.length) {
@@ -387,7 +408,6 @@
             image.addEventListener("error", () => reject(new Error("Frame image failed to load.")), { once: true });
           });
         }
-        if (image.decode) await image.decode();
       }
 
       function preloadFirstFrame(updatedAt, token) {
@@ -411,6 +431,10 @@
         setText("pred-move", number(metrics.pred_displacement));
         setText("action-stride", data?.action_stride ?? "--");
         setText("rollout-action", number(metrics.action_accuracy));
+        setText("mcts-ade", number(metrics.mcts_ADE));
+        setText("mcts-action", number(metrics.mcts_action_accuracy));
+        setText("mcts-move", number(metrics.mcts_displacement));
+        setText("mcts-sims", data?.mcts?.simulations ?? "--");
       }
 
       async function configureRollout(data) {

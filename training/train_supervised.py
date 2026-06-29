@@ -19,6 +19,7 @@ from data.tracking_dataset import (
     list_sequences,
 )
 from models.qwen_football import QwenFootballModel
+from training.mcts import run_trajectory_mcts
 
 
 def ade(pred: np.ndarray, target: np.ndarray) -> float:
@@ -185,6 +186,10 @@ def save_prediction_artifacts(
     split: str,
     input_frames: int,
     horizon: int,
+    mcts_simulations: int,
+    mcts_top_k: int,
+    mcts_c_puct: float,
+    mcts_fde_weight: float,
 ) -> None:
     """Save visual artifacts for held-out eval rollouts."""
     if len(dataset) == 0:
@@ -212,6 +217,10 @@ def save_prediction_artifacts(
             split=split,
             input_frames=input_frames,
             horizon=horizon,
+            mcts_simulations=mcts_simulations,
+            mcts_top_k=mcts_top_k,
+            mcts_c_puct=mcts_c_puct,
+            mcts_fde_weight=mcts_fde_weight,
         )
         rollouts.append(rollout)
         if preview_image is None:
@@ -235,6 +244,10 @@ def build_rollout_artifact(
     split: str,
     input_frames: int,
     horizon: int,
+    mcts_simulations: int,
+    mcts_top_k: int,
+    mcts_c_puct: float,
+    mcts_fde_weight: float,
 ) -> tuple[dict, Image.Image]:
     """Build a rollout JSON payload and preview image for one sample."""
     bbox = sample["player_bbox"].unsqueeze(0).to(device)
@@ -254,6 +267,22 @@ def build_rollout_artifact(
             outputs = model.forward_outputs(frames, bbox, greedy=True)
         pred = outputs["future_xy"][0].detach().cpu().numpy()
         action_logits = outputs["action_logits"][0].detach().cpu()
+        mcts_result = None
+        if mcts_simulations > 0:
+            if "visual_features" in sample:
+                mcts_visual_features = sample["visual_features"].unsqueeze(0).to(device)
+            else:
+                mcts_visual_features = model.extract_visual_features(sample["frames"].unsqueeze(0).to(device))
+            mcts_result = run_trajectory_mcts(
+                model=model,
+                visual_features=mcts_visual_features,
+                player_bbox=bbox,
+                target_xy=sample["future_xy"].unsqueeze(0).to(device),
+                simulations=mcts_simulations,
+                top_k=mcts_top_k,
+                c_puct=mcts_c_puct,
+                fde_weight=mcts_fde_weight,
+            )
     if was_training:
         model.train()
     target = sample["future_xy"].numpy()
@@ -295,6 +324,22 @@ def build_rollout_artifact(
     current_xy = np.array([[cx, cy]], dtype=np.float32)
     actual_points = np.concatenate([current_xy, target], axis=0)
     pred_points = np.concatenate([current_xy, pred], axis=0)
+    mcts = None
+    if mcts_result is not None:
+        mcts_future = mcts_result["future_xy"].detach().cpu().numpy()
+        mcts_points = np.concatenate([current_xy, mcts_future], axis=0)
+        mcts_action_pred = torch.tensor(mcts_result["actions"], dtype=torch.long)
+        mcts_action_accuracy = float((mcts_action_pred == action_labels).float().mean().item())
+        mcts = {
+            "future_xy": mcts_future,
+            "points": mcts_points,
+            "actions": mcts_result["actions"],
+            "action_accuracy": mcts_action_accuracy,
+            "root_visits": int(mcts_result["root_visits"]),
+            "root_children": mcts_result["root_children"],
+            "ADE": float(mcts_result["ADE"]),
+            "FDE": float(mcts_result["FDE"]),
+        }
 
     def to_pixels(points: np.ndarray) -> list[tuple[float, float]]:
         return [(float(x * width), float(y * height)) for x, y in points]
@@ -303,11 +348,17 @@ def build_rollout_artifact(
     pred_pixels = to_pixels(pred_points)
     draw.line(actual_pixels, fill=(80, 220, 120), width=3)
     draw.line(pred_pixels, fill=(255, 80, 80), width=3)
+    if mcts is not None:
+        mcts_pixels = to_pixels(mcts["points"])
+        draw.line(mcts_pixels, fill=(80, 180, 255), width=3)
     for point in actual_pixels[1::4]:
         draw.ellipse([point[0] - 2, point[1] - 2, point[0] + 2, point[1] + 2], fill=(80, 220, 120))
     for point in pred_pixels[1::4]:
         draw.ellipse([point[0] - 2, point[1] - 2, point[0] + 2, point[1] + 2], fill=(255, 80, 80))
-    draw.text((8, 8), "green=actual red=pred", fill=(255, 255, 255))
+    if mcts is not None:
+        for point in mcts_pixels[1::4]:
+            draw.ellipse([point[0] - 2, point[1] - 2, point[0] + 2, point[1] + 2], fill=(80, 180, 255))
+    draw.text((8, 8), "green=actual red=pred blue=mcts", fill=(255, 255, 255))
 
     start_frame = int(sample["start_frame"])
     input_frame_numbers = list(range(start_frame, start_frame + input_frames))
@@ -342,6 +393,23 @@ def build_rollout_artifact(
             "teacher_action_accuracy": sample_teacher_action_accuracy,
         },
     }
+    if mcts is not None:
+        rollout["mcts_xy"] = mcts["points"].tolist()
+        rollout["mcts_action_indices"] = mcts["actions"]
+        rollout["mcts"] = {
+            "simulations": mcts_simulations,
+            "top_k": mcts_top_k,
+            "c_puct": mcts_c_puct,
+            "fde_weight": mcts_fde_weight,
+            "root_visits": mcts["root_visits"],
+            "root_children": mcts["root_children"],
+        }
+        rollout["metrics"].update({
+            "mcts_ADE": mcts["ADE"],
+            "mcts_FDE": mcts["FDE"],
+            "mcts_displacement": float(np.linalg.norm(mcts["future_xy"][-1] - input_centers[-1])),
+            "mcts_action_accuracy": mcts["action_accuracy"],
+        })
     return rollout, image
 
 
@@ -402,6 +470,10 @@ def train(
     log_every: int = 10,
     preview_path: str = "trajectory_preview.png",
     rollouts_path: str = "trajectory_rollouts.json",
+    mcts_simulations: int = 0,
+    mcts_top_k: int = 8,
+    mcts_c_puct: float = 1.5,
+    mcts_fde_weight: float = 0.5,
 ):
     """Run supervised trajectory training on fixed train/eval sequence subsets."""
 
@@ -498,6 +570,10 @@ def train(
         "feature_cache_batch_size": feature_cache_batch_size,
         "policy_loss_weight": policy_loss_weight,
         "selected_samples": selected_samples,
+        "mcts_simulations": mcts_simulations,
+        "mcts_top_k": mcts_top_k,
+        "mcts_c_puct": mcts_c_puct,
+        "mcts_fde_weight": mcts_fde_weight,
     }
     Path("sequence_manifest.json").write_text(json.dumps(manifest, indent=2))
 
@@ -642,6 +718,10 @@ def train(
         split=split,
         input_frames=input_frames,
         horizon=horizon,
+        mcts_simulations=mcts_simulations,
+        mcts_top_k=mcts_top_k,
+        mcts_c_puct=mcts_c_puct,
+        mcts_fde_weight=mcts_fde_weight,
     )
 
     # Save history
@@ -687,6 +767,10 @@ if __name__ == "__main__":
     parser.add_argument("--cache-visual-features", action="store_true")
     parser.add_argument("--feature-cache-batch-size", type=int, default=4)
     parser.add_argument("--policy-loss-weight", type=float, default=0.05)
+    parser.add_argument("--mcts-simulations", type=int, default=0)
+    parser.add_argument("--mcts-top-k", type=int, default=8)
+    parser.add_argument("--mcts-c-puct", type=float, default=1.5)
+    parser.add_argument("--mcts-fde-weight", type=float, default=0.5)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -713,5 +797,9 @@ if __name__ == "__main__":
         cache_visual_features=args.cache_visual_features,
         feature_cache_batch_size=args.feature_cache_batch_size,
         policy_loss_weight=args.policy_loss_weight,
+        mcts_simulations=args.mcts_simulations,
+        mcts_top_k=args.mcts_top_k,
+        mcts_c_puct=args.mcts_c_puct,
+        mcts_fde_weight=args.mcts_fde_weight,
         device=args.device,
     )

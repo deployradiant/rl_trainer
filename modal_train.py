@@ -53,6 +53,10 @@ def run_overfit(
     cache_visual_features: bool = False,
     feature_cache_batch_size: int = 4,
     policy_loss_weight: float = 0.05,
+    mcts_simulations: int = 0,
+    mcts_top_k: int = 8,
+    mcts_c_puct: float = 1.5,
+    mcts_fde_weight: float = 0.5,
 ):
     import os
     import sys
@@ -99,6 +103,10 @@ def run_overfit(
         cache_visual_features=cache_visual_features,
         feature_cache_batch_size=feature_cache_batch_size,
         policy_loss_weight=policy_loss_weight,
+        mcts_simulations=mcts_simulations,
+        mcts_top_k=mcts_top_k,
+        mcts_c_puct=mcts_c_puct,
+        mcts_fde_weight=mcts_fde_weight,
         device="cuda",
     )
 
@@ -141,6 +149,10 @@ def main(
     cache_visual_features: bool = False,
     feature_cache_batch_size: int = 4,
     policy_loss_weight: float = 0.05,
+    mcts_simulations: int = 0,
+    mcts_top_k: int = 8,
+    mcts_c_puct: float = 1.5,
+    mcts_fde_weight: float = 0.5,
 ):
     results = run_overfit.remote(
         sequence=sequence,
@@ -164,5 +176,9 @@ def main(
         cache_visual_features=cache_visual_features,
         feature_cache_batch_size=feature_cache_batch_size,
         policy_loss_weight=policy_loss_weight,
+        mcts_simulations=mcts_simulations,
+        mcts_top_k=mcts_top_k,
+        mcts_c_puct=mcts_c_puct,
+        mcts_fde_weight=mcts_fde_weight,
     )
     print(f"\nModal training complete: {results}")
