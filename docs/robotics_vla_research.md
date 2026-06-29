@@ -323,6 +323,9 @@ chunk policy clearly wins. The project is still young enough to replace it.
 Implement the ACT-style chunk head and baseline metrics before another RL
 iteration. It is the cleanest robotics-derived step:
 
+See [action_chunk_policy_proposal.md](action_chunk_policy_proposal.md) for the
+implementation proposal.
+
 ```text
 input: last N frames + selected-player history
 target: next 1s relative trajectory chunk
