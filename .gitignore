@@ -1,0 +1,13 @@
+.venv/
+data/SoccerNet/
+data/sample/
+data/sample_clip/
+__pycache__/
+*.pyc
+*.pt
+*.json
+training_history.json
+trajectory_head.pt
+trajectory_preview.png
+trajectory_rollout.json
+artifacts/

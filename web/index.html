@@ -1,0 +1,625 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RL Trainer Visualizer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"],
+            },
+          },
+        },
+      };
+    </script>
+  </head>
+  <body class="min-h-screen bg-zinc-950 text-zinc-100 antialiased">
+    <main class="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
+      <header class="flex flex-col gap-3 border-b border-zinc-800 pb-4 md:flex-row md:items-end md:justify-between">
+        <div>
+          <p class="text-xs font-semibold uppercase tracking-[0.22em] text-emerald-300">SoccerNet train split</p>
+          <h1 class="mt-1 text-2xl font-semibold tracking-normal text-white sm:text-3xl">Football Trajectory Eval</h1>
+        </div>
+        <div class="flex flex-wrap items-center gap-2 text-sm text-zinc-300">
+          <span id="status" class="rounded-full border border-amber-400/40 bg-amber-400/10 px-3 py-1 text-amber-100">Loading</span>
+          <span id="updated" class="text-zinc-500"></span>
+        </div>
+      </header>
+
+      <section class="grid flex-1 gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,0.55fr)]">
+        <div class="flex flex-col gap-5">
+          <section class="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900/70">
+            <div class="flex flex-col gap-3 border-b border-zinc-800 px-4 py-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <h2 class="text-sm font-semibold uppercase tracking-[0.18em] text-zinc-400">Rollout Player</h2>
+                <p id="rollout-meta" class="mt-1 text-sm text-zinc-500">--</p>
+              </div>
+              <div class="flex flex-wrap items-center gap-3 text-xs">
+                <select id="sequence-select" class="h-9 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-white" aria-label="Select rollout sequence"></select>
+                <span class="flex items-center gap-1.5 text-emerald-300"><span class="h-2.5 w-2.5 rounded-full bg-emerald-400"></span>Actual</span>
+                <span class="flex items-center gap-1.5 text-red-300"><span class="h-2.5 w-2.5 rounded-full bg-red-400"></span>Predicted</span>
+                <span class="flex items-center gap-1.5 text-sky-300"><span class="h-2.5 w-2.5 rounded-full bg-sky-400"></span>MCTS</span>
+                <span class="flex items-center gap-1.5 text-white"><span class="h-2.5 w-2.5 rounded-sm bg-white"></span>Box</span>
+              </div>
+            </div>
+
+            <div class="p-4">
+              <div class="relative overflow-hidden rounded-md bg-black">
+                <canvas id="rollout-canvas" class="aspect-video w-full"></canvas>
+                <div id="rollout-empty" class="absolute inset-0 flex items-center justify-center px-6 text-center text-sm text-zinc-500">No rollout artifact found.</div>
+              </div>
+
+              <div class="mt-4 grid gap-3 md:grid-cols-[auto_auto_minmax(0,1fr)_auto_auto] md:items-center">
+                <div class="flex items-center gap-2">
+                  <button id="prev-frame" class="h-10 w-10 rounded-md border border-zinc-700 bg-zinc-900 text-sm font-semibold text-white hover:bg-zinc-800" aria-label="Previous frame">&lt;</button>
+                  <button id="play-toggle" class="h-10 w-14 rounded-md border border-emerald-500/40 bg-emerald-500/15 text-sm font-semibold text-emerald-100 hover:bg-emerald-500/25" aria-label="Play">Play</button>
+                  <button id="next-frame" class="h-10 w-10 rounded-md border border-zinc-700 bg-zinc-900 text-sm font-semibold text-white hover:bg-zinc-800" aria-label="Next frame">&gt;</button>
+                </div>
+                <div id="frame-label" class="text-sm font-medium text-zinc-300">Frame --</div>
+                <input id="frame-scrubber" type="range" min="0" max="0" value="0" class="h-2 w-full accent-emerald-400" />
+                <select id="speed" class="h-10 rounded-md border border-zinc-700 bg-zinc-900 px-3 text-sm text-white">
+                  <option value="0.25">0.25x</option>
+                  <option value="0.5">0.5x</option>
+                  <option value="1" selected>1x</option>
+                  <option value="2">2x</option>
+                </select>
+                <div id="phase-label" class="text-sm font-medium text-zinc-400">--</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="rounded-lg border border-zinc-800 bg-zinc-900/70 p-4">
+            <div class="flex items-center justify-between gap-3">
+              <h2 class="text-sm font-semibold uppercase tracking-[0.18em] text-zinc-400">Metric History</h2>
+              <span id="epoch-label" class="text-sm text-zinc-500">--</span>
+            </div>
+            <canvas id="history-chart" class="mt-4 h-48 w-full rounded-md bg-zinc-950/70"></canvas>
+          </section>
+        </div>
+
+        <aside class="flex flex-col gap-5">
+          <section class="grid grid-cols-2 gap-3">
+            <div class="rounded-lg border border-emerald-400/20 bg-emerald-400/10 p-4">
+              <p class="text-xs uppercase tracking-[0.16em] text-emerald-200">Train ADE</p>
+              <p id="train-ade" class="mt-2 text-3xl font-semibold text-white">--</p>
+            </div>
+            <div class="rounded-lg border border-emerald-400/20 bg-emerald-400/10 p-4">
+              <p class="text-xs uppercase tracking-[0.16em] text-emerald-200">Train FDE</p>
+              <p id="train-fde" class="mt-2 text-3xl font-semibold text-white">--</p>
+            </div>
+            <div class="rounded-lg border border-red-400/20 bg-red-400/10 p-4">
+              <p class="text-xs uppercase tracking-[0.16em] text-red-200">Eval ADE</p>
+              <p id="eval-ade" class="mt-2 text-3xl font-semibold text-white">--</p>
+            </div>
+            <div class="rounded-lg border border-red-400/20 bg-red-400/10 p-4">
+              <p class="text-xs uppercase tracking-[0.16em] text-red-200">Eval FDE</p>
+              <p id="eval-fde" class="mt-2 text-3xl font-semibold text-white">--</p>
+            </div>
+          </section>
+
+          <section class="rounded-lg border border-zinc-800 bg-zinc-900/70 p-4">
+            <h2 class="text-sm font-semibold uppercase tracking-[0.18em] text-zinc-400">Run</h2>
+            <dl class="mt-4 grid grid-cols-2 gap-3 text-sm">
+              <div>
+                <dt class="text-zinc-500">Loss</dt>
+                <dd id="loss" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Split</dt>
+                <dd id="split" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Seed</dt>
+                <dd id="seed" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Available</dt>
+                <dd id="available" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Train</dt>
+                <dd id="train-count" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Eval</dt>
+                <dd id="eval-count" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Horizon</dt>
+                <dd id="horizon" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Overfit</dt>
+                <dd id="overfit" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Rollout ADE</dt>
+                <dd id="rollout-ade" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Actual move</dt>
+                <dd id="actual-move" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Pred move</dt>
+                <dd id="pred-move" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Action stride</dt>
+                <dd id="action-stride" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Rollout act</dt>
+                <dd id="rollout-action" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Value act</dt>
+                <dd id="value-action" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">MCTS ADE</dt>
+                <dd id="mcts-ade" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">MCTS act</dt>
+                <dd id="mcts-action" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">MCTS move</dt>
+                <dd id="mcts-move" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">MCTS sims</dt>
+                <dd id="mcts-sims" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Search val</dt>
+                <dd id="mcts-value" class="mt-1 font-medium text-white">--</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section class="rounded-lg border border-zinc-800 bg-zinc-900/70 p-4">
+            <h2 class="text-sm font-semibold uppercase tracking-[0.18em] text-zinc-400">Train Set</h2>
+            <div id="train-sequences" class="mt-3 flex flex-wrap gap-2"></div>
+          </section>
+
+          <section class="rounded-lg border border-zinc-800 bg-zinc-900/70 p-4">
+            <h2 class="text-sm font-semibold uppercase tracking-[0.18em] text-zinc-400">Eval Set</h2>
+            <div id="eval-sequences" class="mt-3 flex flex-wrap gap-2"></div>
+          </section>
+        </aside>
+      </section>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const metricIds = {
+        train_ADE: "train-ade",
+        train_FDE: "train-fde",
+        eval_ADE: "eval-ade",
+        eval_FDE: "eval-fde",
+      };
+
+      let rollout = null;
+      let rollouts = [];
+      let rolloutVersion = null;
+      let selectedRolloutId = null;
+      let frameImages = [];
+      let frameIndex = 0;
+      let playing = false;
+      let playTimer = null;
+      let rolloutLoadToken = 0;
+
+      function number(value, digits = 4) {
+        return Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "--";
+      }
+
+      function chip(sequence, tone) {
+        const color = tone === "eval" ? "border-red-400/30 bg-red-400/10 text-red-100" : "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
+        return `<span class="rounded-full border ${color} px-2.5 py-1 text-xs font-medium">${sequence}</span>`;
+      }
+
+      function setText(id, value) {
+        $(id).textContent = value ?? "--";
+      }
+
+      function rolloutId(item) {
+        return `${item.sequence}:${item.track_id}:${item.start_frame}`;
+      }
+
+      function rolloutLabel(item) {
+        return `${item.sequence} / track ${item.track_id} / frame ${item.start_frame}`;
+      }
+
+      function selectedRollout() {
+        if (!rollouts.length) return null;
+        return rollouts.find((item) => rolloutId(item) === selectedRolloutId) || rollouts[0];
+      }
+
+      function syncSequenceSelect() {
+        const select = $("sequence-select");
+        select.replaceChildren(...rollouts.map((item) => {
+          const id = rolloutId(item);
+          const option = document.createElement("option");
+          option.value = id;
+          option.textContent = rolloutLabel(item);
+          return option;
+        }));
+        const selectedStillExists = rollouts.some((item) => rolloutId(item) === selectedRolloutId);
+        if (!selectedStillExists) selectedRolloutId = rollouts.length ? rolloutId(rollouts[0]) : null;
+        if (selectedRolloutId) select.value = selectedRolloutId;
+        select.disabled = rollouts.length <= 1;
+      }
+
+      function showRolloutMessage(message) {
+        const empty = $("rollout-empty");
+        empty.textContent = message;
+        empty.classList.remove("hidden");
+      }
+
+      function hideRolloutMessage() {
+        const empty = $("rollout-empty");
+        empty.textContent = "";
+        empty.classList.add("hidden");
+      }
+
+      function resizeCanvas(canvas) {
+        const rect = canvas.getBoundingClientRect();
+        const ratio = window.devicePixelRatio || 1;
+        canvas.width = Math.max(1, Math.floor(rect.width * ratio));
+        canvas.height = Math.max(1, Math.floor(rect.height * ratio));
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+        return { ctx, width: rect.width, height: rect.height };
+      }
+
+      function pointToCanvas(point, imageRect) {
+        return {
+          x: imageRect.x + point[0] * imageRect.width,
+          y: imageRect.y + point[1] * imageRect.height,
+        };
+      }
+
+      function drawLine(ctx, points, imageRect, color, width) {
+        if (!points.length) return;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = width;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        points.forEach((point, index) => {
+          const pixel = pointToCanvas(point, imageRect);
+          if (index === 0) ctx.moveTo(pixel.x, pixel.y);
+          else ctx.lineTo(pixel.x, pixel.y);
+        });
+        ctx.stroke();
+      }
+
+      function drawPoint(ctx, point, imageRect, color, radius) {
+        const pixel = pointToCanvas(point, imageRect);
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(pixel.x, pixel.y, radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function drawBox(ctx, bbox, imageRect) {
+        const cx = imageRect.x + bbox[0] * imageRect.width;
+        const cy = imageRect.y + bbox[1] * imageRect.height;
+        const bw = bbox[2] * imageRect.width;
+        const bh = bbox[3] * imageRect.height;
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(cx - bw / 2, cy - bh / 2, bw, bh);
+      }
+
+      function drawRolloutFrame() {
+        const canvas = $("rollout-canvas");
+        const { ctx, width, height } = resizeCanvas(canvas);
+        ctx.fillStyle = "#000000";
+        ctx.fillRect(0, 0, width, height);
+
+        if (!rollout || !rollout.frame_numbers?.length) return;
+
+        const image = frameImages[frameIndex];
+        let imageRect = { x: 0, y: 0, width, height };
+        if (image?.complete && image.naturalWidth) {
+          const scale = Math.min(width / image.naturalWidth, height / image.naturalHeight);
+          imageRect = {
+            width: image.naturalWidth * scale,
+            height: image.naturalHeight * scale,
+          };
+          imageRect.x = (width - imageRect.width) / 2;
+          imageRect.y = (height - imageRect.height) / 2;
+          ctx.drawImage(image, imageRect.x, imageRect.y, imageRect.width, imageRect.height);
+        } else {
+          ctx.fillStyle = "#18181b";
+          ctx.fillRect(0, 0, width, height);
+        }
+
+        const actualPoints = rollout.actual_xy.slice(0, frameIndex + 1);
+        drawLine(ctx, actualPoints, imageRect, "#34d399", 4);
+        if (actualPoints.length) drawPoint(ctx, actualPoints[actualPoints.length - 1], imageRect, "#6ee7b7", 5);
+
+        if (frameIndex >= rollout.current_index) {
+          const predCount = frameIndex - rollout.current_index + 1;
+          const predPoints = rollout.pred_xy.slice(0, predCount);
+          drawLine(ctx, predPoints, imageRect, "#fb7185", 4);
+          if (predPoints.length) drawPoint(ctx, predPoints[predPoints.length - 1], imageRect, "#fda4af", 5);
+
+          const mctsPoints = rollout.mcts_xy?.slice(0, predCount) || [];
+          drawLine(ctx, mctsPoints, imageRect, "#38bdf8", 4);
+          if (mctsPoints.length) drawPoint(ctx, mctsPoints[mctsPoints.length - 1], imageRect, "#7dd3fc", 5);
+        }
+
+        if (frameIndex < rollout.input_bboxes.length) {
+          drawBox(ctx, rollout.input_bboxes[frameIndex], imageRect);
+        }
+
+        const frameNumber = rollout.frame_numbers[frameIndex];
+        const phase = frameIndex < rollout.current_index ? "input" : frameIndex === rollout.current_index ? "decision" : "future";
+        setText("frame-label", `Frame ${frameNumber}`);
+        setText("phase-label", phase);
+      }
+
+      function setPlaying(next) {
+        playing = next;
+        $("play-toggle").textContent = playing ? "Pause" : "Play";
+        if (playTimer) clearInterval(playTimer);
+        playTimer = null;
+        if (!playing || !rollout) return;
+        const speed = Number($("speed").value || 1);
+        const fps = Math.max(1, Number(rollout.fps || 25) * speed);
+        playTimer = setInterval(() => {
+          if (frameIndex >= rollout.frame_numbers.length - 1) {
+            setPlaying(false);
+            return;
+          }
+          frameIndex += 1;
+          $("frame-scrubber").value = frameIndex;
+          drawRolloutFrame();
+        }, 1000 / fps);
+      }
+
+      function frameUrl(frameNumber, updatedAt) {
+        return `/frames/${encodeURIComponent(rollout.sequence)}/${frameNumber}.jpg?v=${updatedAt || Date.now()}`;
+      }
+
+      function frameIsLoaded(image) {
+        return Boolean(image?.complete && image.naturalWidth);
+      }
+
+      function createFrameImage(frameNumber, updatedAt, token) {
+        const image = document.createElement("img");
+        image.decoding = "async";
+        image.loading = "eager";
+        image.addEventListener("load", () => {
+          if (token === rolloutLoadToken) drawRolloutFrame();
+        });
+        image.addEventListener("error", () => {
+          if (token === rolloutLoadToken) showRolloutMessage(`Could not load frame ${frameNumber}.`);
+        });
+        image.src = frameUrl(frameNumber, updatedAt);
+        return image;
+      }
+
+      async function waitForFrame(image) {
+        if (!frameIsLoaded(image)) {
+          if (image?.complete && !image.naturalWidth) throw new Error("Frame image failed to load.");
+          await new Promise((resolve, reject) => {
+            image.addEventListener("load", () => resolve(), { once: true });
+            image.addEventListener("error", () => reject(new Error("Frame image failed to load.")), { once: true });
+          });
+        }
+      }
+
+      function preloadFirstFrame(updatedAt, token) {
+        frameImages = new Array(rollout.frame_numbers.length);
+        frameImages[0] = createFrameImage(rollout.frame_numbers[0], updatedAt, token);
+        return frameImages[0];
+      }
+
+      function preloadRemainingFrames(updatedAt, token) {
+        rollout.frame_numbers.forEach((frameNumber, index) => {
+          if (index === 0 || token !== rolloutLoadToken) return;
+          frameImages[index] = createFrameImage(frameNumber, updatedAt, token);
+        });
+      }
+
+      function updateRolloutStats(data) {
+        const metrics = data?.metrics || {};
+        setText("horizon", data?.horizon ?? "--");
+        setText("rollout-ade", number(metrics.ADE));
+        setText("actual-move", number(metrics.actual_displacement));
+        setText("pred-move", number(metrics.pred_displacement));
+        setText("action-stride", data?.action_stride ?? "--");
+        setText("rollout-action", number(metrics.action_accuracy));
+        setText("value-action", number(metrics.value_action_accuracy));
+        setText("mcts-ade", number(metrics.mcts_ADE));
+        setText("mcts-action", number(metrics.mcts_action_accuracy));
+        setText("mcts-move", number(metrics.mcts_displacement));
+        setText("mcts-sims", data?.mcts?.simulations ?? "--");
+        setText("mcts-value", number(data?.mcts?.learned_value));
+      }
+
+      async function configureRollout(data) {
+        const token = ++rolloutLoadToken;
+        rollout = data;
+        frameIndex = 0;
+        setPlaying(false);
+        showRolloutMessage("Loading first frame...");
+        $("frame-scrubber").max = Math.max(0, rollout.frame_numbers.length - 1);
+        $("frame-scrubber").value = 0;
+        const adeLabel = rollout.metrics?.ADE != null ? ` / ADE ${number(rollout.metrics.ADE)}` : "";
+        $("rollout-meta").textContent = `${rollout.sequence} / track ${rollout.track_id} / ${rollout.frame_numbers.length} frames${adeLabel}`;
+        updateRolloutStats(rollout);
+        const firstFrame = preloadFirstFrame(data.updated_at, token);
+        drawRolloutFrame();
+        try {
+          await waitForFrame(firstFrame);
+          if (token !== rolloutLoadToken) return;
+          hideRolloutMessage();
+          drawRolloutFrame();
+          preloadRemainingFrames(data.updated_at, token);
+        } catch (error) {
+          if (token === rolloutLoadToken) showRolloutMessage(error.message);
+        }
+      }
+
+      function drawHistory(history) {
+        const canvas = $("history-chart");
+        const { ctx, width, height } = resizeCanvas(canvas);
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = "#09090b";
+        ctx.fillRect(0, 0, width, height);
+
+        if (!history.length) {
+          ctx.fillStyle = "#71717a";
+          ctx.font = "13px system-ui";
+          ctx.fillText("No metric history", 18, 30);
+          return;
+        }
+
+        const padding = { top: 18, right: 18, bottom: 28, left: 42 };
+        const keys = [
+          ["train_ADE", "#34d399"],
+          ["eval_ADE", "#f87171"],
+        ];
+        const values = history.flatMap((row) => keys.map(([key]) => Number(row[key])).filter(Number.isFinite));
+        const maxValue = Math.max(...values, 0.01);
+        const minValue = Math.min(...values, 0);
+        const yRange = Math.max(0.001, maxValue - minValue);
+        const xRange = Math.max(1, history.length - 1);
+        const plotW = width - padding.left - padding.right;
+        const plotH = height - padding.top - padding.bottom;
+
+        ctx.strokeStyle = "#3f3f46";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(padding.left, padding.top);
+        ctx.lineTo(padding.left, padding.top + plotH);
+        ctx.lineTo(padding.left + plotW, padding.top + plotH);
+        ctx.stroke();
+
+        ctx.fillStyle = "#a1a1aa";
+        ctx.font = "12px system-ui";
+        ctx.fillText(maxValue.toFixed(3), 8, padding.top + 4);
+        ctx.fillText(minValue.toFixed(3), 8, padding.top + plotH);
+
+        for (const [key, color] of keys) {
+          ctx.strokeStyle = color;
+          ctx.fillStyle = color;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          history.forEach((row, index) => {
+            const x = padding.left + (index / xRange) * plotW;
+            const y = padding.top + plotH - ((Number(row[key]) - minValue) / yRange) * plotH;
+            if (index === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          });
+          ctx.stroke();
+          history.forEach((row, index) => {
+            const x = padding.left + (index / xRange) * plotW;
+            const y = padding.top + plotH - ((Number(row[key]) - minValue) / yRange) * plotH;
+            ctx.beginPath();
+            ctx.arc(x, y, 4, 0, Math.PI * 2);
+            ctx.fill();
+          });
+        }
+      }
+
+      async function loadResults() {
+        try {
+          const response = await fetch("/api/results", { cache: "no-store" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = await response.json();
+          const manifest = data.manifest || {};
+          const latest = data.latest || {};
+          const history = data.history || [];
+          const rolloutsInfo = data.rollouts || {};
+          rollouts = Array.isArray(rolloutsInfo.data) ? rolloutsInfo.data : [];
+          syncSequenceSelect();
+          const rolloutData = selectedRollout() || {};
+
+          $("status").textContent = rollouts.length ? "Live rollouts" : "Missing rollouts";
+          $("status").className = rollouts.length
+            ? "rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 py-1 text-emerald-100"
+            : "rounded-full border border-red-400/40 bg-red-400/10 px-3 py-1 text-red-100";
+
+          const updatedAt = rolloutsInfo.updated_at || data.preview?.updated_at;
+          $("updated").textContent = updatedAt ? new Date(updatedAt * 1000).toLocaleString() : "";
+
+          for (const [key, id] of Object.entries(metricIds)) setText(id, number(latest[key]));
+          setText("loss", number(latest.loss, 6));
+          setText("split", manifest.split);
+          setText("seed", manifest.seed);
+          setText("available", manifest.available_sequences);
+          setText("train-count", manifest.train_sequences?.length ?? "--");
+          setText("eval-count", manifest.eval_sequences?.length ?? "--");
+          setText("overfit", manifest.overfit_samples ? `${manifest.overfit_samples} ${manifest.sample_selection}` : "off");
+          updateRolloutStats(rolloutData);
+          setText("epoch-label", latest.epoch ? `Epoch ${latest.epoch}` : "--");
+
+          $("train-sequences").innerHTML = (manifest.train_sequences || []).map((seq) => chip(seq, "train")).join("");
+          $("eval-sequences").innerHTML = (manifest.eval_sequences || []).map((seq) => chip(seq, "eval")).join("");
+
+          if (rollouts.length && rolloutData.frame_numbers) {
+            const candidate = rolloutData;
+            const version = `${updatedAt || 0}:${rolloutId(candidate)}`;
+            if (version !== rolloutVersion) {
+              rolloutVersion = version;
+              configureRollout({ ...candidate, updated_at: updatedAt });
+            }
+          } else {
+            rollout = null;
+            showRolloutMessage("No rollout artifact found.");
+          }
+
+          drawHistory(history);
+        } catch (error) {
+          $("status").textContent = "Load failed";
+          $("status").className = "rounded-full border border-red-400/40 bg-red-400/10 px-3 py-1 text-red-100";
+          showRolloutMessage(error.message);
+          drawHistory([]);
+        }
+      }
+
+      $("play-toggle").addEventListener("click", () => setPlaying(!playing));
+      $("prev-frame").addEventListener("click", () => {
+        if (!rollout) return;
+        frameIndex = Math.max(0, frameIndex - 1);
+        $("frame-scrubber").value = frameIndex;
+        drawRolloutFrame();
+      });
+      $("next-frame").addEventListener("click", () => {
+        if (!rollout) return;
+        frameIndex = Math.min(rollout.frame_numbers.length - 1, frameIndex + 1);
+        $("frame-scrubber").value = frameIndex;
+        drawRolloutFrame();
+      });
+      $("frame-scrubber").addEventListener("input", (event) => {
+        frameIndex = Number(event.target.value);
+        drawRolloutFrame();
+      });
+      $("speed").addEventListener("change", () => {
+        if (playing) setPlaying(true);
+      });
+      $("sequence-select").addEventListener("change", (event) => {
+        selectedRolloutId = event.target.value;
+        rolloutVersion = null;
+        const candidate = selectedRollout();
+        if (candidate) configureRollout(candidate);
+      });
+      window.addEventListener("resize", () => {
+        drawRolloutFrame();
+      });
+      loadResults();
+      setInterval(loadResults, 30000);
+    </script>
+  </body>
+</html>

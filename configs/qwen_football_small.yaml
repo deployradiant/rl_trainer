@@ -1,0 +1,19 @@
+model_name: Qwen/Qwen2-VL-2B-Instruct
+input_frames: 5
+horizon: 25
+stride: 50
+image_size: 224
+max_frames: 250
+
+# Training
+batch_size: 2
+epochs: 100
+lr: 0.001
+log_every: 10
+train_fraction: 0.10
+eval_fraction: 0.02
+seed: 7
+
+# Data
+data_root: data/SoccerNet/tracking-2023
+split: train
