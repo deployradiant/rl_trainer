@@ -40,8 +40,8 @@ class QwenFootballModel(nn.Module):
     """Qwen2-VL vision encoder + trainable trajectory heads.
 
     Input frames are processed through Qwen's vision encoder individually.
-    The task-facing Qwen vision merger is trainable by default so overfit
-    checks exercise Qwen itself instead of only the downstream heads.
+    The Qwen visual encoder is trainable by default so overfit checks exercise
+    Qwen itself instead of only the downstream heads.
     """
 
     def __init__(
@@ -65,7 +65,7 @@ class QwenFootballModel(nn.Module):
         # Load Qwen VLM
         self.vlm = Qwen2VLForConditionalGeneration.from_pretrained(
             model_name,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,
         )
 
         # Image processor for Qwen vision encoder
@@ -92,13 +92,13 @@ class QwenFootballModel(nn.Module):
         self.value_head = RelativeMotionPolicyHead(head_input, action_count=len(self.action_codebook))
 
     def configure_qwen_training(self) -> None:
-        """Train Qwen's visual output layers by default."""
+        """Train Qwen's full visual stack by default."""
         for param in self.vlm.parameters():
             param.requires_grad = False
 
-        matched = self._set_qwen_requires_grad(lambda name: name.startswith("visual.merger."))
+        matched = self._set_qwen_requires_grad(lambda name: name.startswith("visual."))
         if matched == 0:
-            raise ValueError("Could not find trainable Qwen visual merger parameters")
+            raise ValueError("Could not find trainable Qwen visual parameters")
         self.qwen_has_trainable_parameters = True
 
     def qwen_trainable_parameter_names(self) -> list[str]:

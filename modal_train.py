@@ -26,7 +26,7 @@ image = (
 
 
 @app.function(
-    gpu="A10G",
+    gpu="H100",
     volumes={"/data": data_vol, "/root/.cache/huggingface": hf_cache},
     image=image,
     timeout=21600,
