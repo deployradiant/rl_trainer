@@ -50,6 +50,8 @@ def run_overfit(
     seed: int = 7,
     overfit_samples: int = 0,
     sample_selection: str = "first",
+    policy_kind: str = "chunk",
+    endpoint_loss_weight: float = 1.0,
     policy_loss_weight: float = 0.05,
     value_loss_weight: float = 1.0,
     value_rank_loss_weight: float = 1.0,
@@ -58,6 +60,7 @@ def run_overfit(
     mcts_simulations: int = 0,
     mcts_top_k: int = 8,
     mcts_c_puct: float = 1.5,
+    save_checkpoint: bool = False,
 ):
     import os
     import sys
@@ -101,6 +104,8 @@ def run_overfit(
         seed=seed,
         overfit_samples=overfit_samples,
         sample_selection=sample_selection,
+        policy_kind=policy_kind,
+        endpoint_loss_weight=endpoint_loss_weight,
         policy_loss_weight=policy_loss_weight,
         value_loss_weight=value_loss_weight,
         value_rank_loss_weight=value_rank_loss_weight,
@@ -109,18 +114,21 @@ def run_overfit(
         mcts_simulations=mcts_simulations,
         mcts_top_k=mcts_top_k,
         mcts_c_puct=mcts_c_puct,
+        save_checkpoint=save_checkpoint,
         device="cuda",
     )
 
     # Save artifacts to volume
     import shutil
-    for fname in [
+    artifact_files = [
         "sequence_manifest.json",
         "training_history.json",
-        "trajectory_head.pt",
         "trajectory_preview.png",
         "trajectory_rollouts.json",
-    ]:
+    ]
+    if save_checkpoint:
+        artifact_files.append("trajectory_head.pt")
+    for fname in artifact_files:
         if os.path.exists(fname):
             shutil.copy(fname, f"/data/{fname}")
     data_vol.commit()
@@ -148,6 +156,8 @@ def main(
     seed: int = 7,
     overfit_samples: int = 0,
     sample_selection: str = "first",
+    policy_kind: str = "chunk",
+    endpoint_loss_weight: float = 1.0,
     policy_loss_weight: float = 0.05,
     value_loss_weight: float = 1.0,
     value_rank_loss_weight: float = 1.0,
@@ -156,6 +166,7 @@ def main(
     mcts_simulations: int = 0,
     mcts_top_k: int = 8,
     mcts_c_puct: float = 1.5,
+    save_checkpoint: bool = False,
 ):
     results = run_overfit.remote(
         sequence=sequence,
@@ -176,6 +187,8 @@ def main(
         seed=seed,
         overfit_samples=overfit_samples,
         sample_selection=sample_selection,
+        policy_kind=policy_kind,
+        endpoint_loss_weight=endpoint_loss_weight,
         policy_loss_weight=policy_loss_weight,
         value_loss_weight=value_loss_weight,
         value_rank_loss_weight=value_rank_loss_weight,
@@ -184,5 +197,6 @@ def main(
         mcts_simulations=mcts_simulations,
         mcts_top_k=mcts_top_k,
         mcts_c_puct=mcts_c_puct,
+        save_checkpoint=save_checkpoint,
     )
     print(f"\nModal training complete: {results}")

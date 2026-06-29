@@ -19,11 +19,12 @@ from data.tracking_dataset import (
 )
 from models.qwen_football import QwenFootballModel
 from training.artifacts import save_prediction_artifacts
-from training.metrics import ade, fde
+from training.baselines import batch_ade, batch_fde, constant_position, constant_velocity
 
 QWEN_LR = 1e-5
 ADAM_EPS = 1e-4
 GRAD_CLIP_NORM = 1.0
+ENDPOINT_LOSS_WEIGHT = 1.0
 
 
 def parameter_grad_norm(parameters: list[torch.nn.Parameter]) -> float:
@@ -36,10 +37,22 @@ def parameter_grad_norm(parameters: list[torch.nn.Parameter]) -> float:
     return total_sq ** 0.5
 
 
+def metric_text(value: float | None, digits: int = 3) -> str:
+    return "--" if value is None else f"{value:.{digits}f}"
+
+
 def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
     was_training = model.training
     model.eval()
-    ades, fdes = [], []
+    sums = {
+        "ADE": 0.0,
+        "FDE": 0.0,
+        "baseline_constant_ADE": 0.0,
+        "baseline_constant_FDE": 0.0,
+        "baseline_velocity_ADE": 0.0,
+        "baseline_velocity_FDE": 0.0,
+    }
+    sample_count = 0
     action_correct = 0
     action_total = 0
     teacher_action_correct = 0
@@ -60,39 +73,45 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
                     greedy=True,
                 )
                 pred = outputs["future_xy"]
-                labels = model.action_labels(bbox, target)
-                action_pred = outputs["action_logits"].argmax(dim=-1)
-                action_correct += int((action_pred == labels).sum().item())
-                action_total += int(labels.numel())
-                teacher_action_pred = model.teacher_forced_action_logits(
-                    visual_features,
-                    bbox,
-                    target,
-                ).argmax(dim=-1)
-                teacher_action_correct += int((teacher_action_pred == labels).sum().item())
-                teacher_action_total += int(labels.numel())
-                value_action_pred = model.teacher_forced_action_values(
-                    visual_features,
-                    bbox,
-                    target,
-                ).argmax(dim=-1)
-                value_action_correct += int((value_action_pred == labels).sum().item())
-                value_action_total += int(labels.numel())
-                pred_np = pred.cpu().numpy()
-                target_np = target.cpu().numpy()
-                for i in range(len(pred_np)):
-                    ades.append(ade(pred_np[i], target_np[i]))
-                    fdes.append(fde(pred_np[i], target_np[i]))
+                constant_pred = constant_position(bbox, target.shape[1])
+                velocity_pred = constant_velocity(bbox, target.shape[1])
+                batch_size = target.shape[0]
+                sample_count += batch_size
+                sums["ADE"] += float(batch_ade(pred, target).sum().item())
+                sums["FDE"] += float(batch_fde(pred, target).sum().item())
+                sums["baseline_constant_ADE"] += float(batch_ade(constant_pred, target).sum().item())
+                sums["baseline_constant_FDE"] += float(batch_fde(constant_pred, target).sum().item())
+                sums["baseline_velocity_ADE"] += float(batch_ade(velocity_pred, target).sum().item())
+                sums["baseline_velocity_FDE"] += float(batch_fde(velocity_pred, target).sum().item())
+                if "action_logits" in outputs:
+                    labels = model.action_labels(bbox, target)
+                    action_pred = outputs["action_logits"].argmax(dim=-1)
+                    action_correct += int((action_pred == labels).sum().item())
+                    action_total += int(labels.numel())
+                    teacher_action_pred = model.teacher_forced_action_logits(
+                        visual_features,
+                        bbox,
+                        target,
+                    ).argmax(dim=-1)
+                    teacher_action_correct += int((teacher_action_pred == labels).sum().item())
+                    teacher_action_total += int(labels.numel())
+                    value_action_pred = model.teacher_forced_action_values(
+                        visual_features,
+                        bbox,
+                        target,
+                    ).argmax(dim=-1)
+                    value_action_correct += int((value_action_pred == labels).sum().item())
+                    value_action_total += int(labels.numel())
     finally:
         if was_training:
             model.train()
-    return {
-        "ADE": float(np.mean(ades)),
-        "FDE": float(np.mean(fdes)),
-        "action_accuracy": action_correct / max(1, action_total),
-        "teacher_action_accuracy": teacher_action_correct / max(1, teacher_action_total),
-        "value_action_accuracy": value_action_correct / max(1, value_action_total),
-    }
+    metrics = {key: value / max(1, sample_count) for key, value in sums.items()}
+    metrics.update({
+        "action_accuracy": action_correct / action_total if action_total else None,
+        "teacher_action_accuracy": teacher_action_correct / teacher_action_total if teacher_action_total else None,
+        "value_action_accuracy": value_action_correct / value_action_total if value_action_total else None,
+    })
+    return metrics
 
 
 def select_sample_indices(
@@ -164,6 +183,8 @@ def train(
     seed: int = 7,
     overfit_samples: int = 0,
     sample_selection: str = "first",
+    policy_kind: str = "chunk",
+    endpoint_loss_weight: float = ENDPOINT_LOSS_WEIGHT,
     policy_loss_weight: float = 0.05,
     value_loss_weight: float = 1.0,
     value_rank_loss_weight: float = 1.0,
@@ -177,6 +198,7 @@ def train(
     mcts_simulations: int = 0,
     mcts_top_k: int = 8,
     mcts_c_puct: float = 1.5,
+    save_checkpoint: bool = False,
 ):
     """Run supervised trajectory training on fixed train/eval sequence subsets."""
 
@@ -268,6 +290,8 @@ def train(
         "eval_sequence_count": eval_sequence_count,
         "overfit_samples": overfit_samples,
         "sample_selection": sample_selection,
+        "policy_kind": policy_kind,
+        "endpoint_loss_weight": endpoint_loss_weight,
         "policy_loss_weight": policy_loss_weight,
         "value_loss_weight": value_loss_weight,
         "value_rank_loss_weight": value_rank_loss_weight,
@@ -280,6 +304,7 @@ def train(
         "mcts_simulations": mcts_simulations,
         "mcts_top_k": mcts_top_k,
         "mcts_c_puct": mcts_c_puct,
+        "save_checkpoint": save_checkpoint,
     }
     Path("sequence_manifest.json").write_text(json.dumps(manifest, indent=2))
 
@@ -288,6 +313,7 @@ def train(
         horizon=horizon,
         input_frames=input_frames,
         action_stride=action_stride,
+        policy_kind=policy_kind,
     )
     model.to(device)
 
@@ -341,6 +367,7 @@ def train(
         model.train()
         epoch_loss = 0.0
         epoch_traj_loss = 0.0
+        epoch_endpoint_loss = 0.0
         epoch_policy_loss = 0.0
         epoch_value_loss = 0.0
         epoch_value_rank_loss = 0.0
@@ -357,31 +384,38 @@ def train(
                 return_outputs=True,
             )
             pred = outputs["future_xy"]
-            action_labels = model.action_labels(bbox, target)
-            teacher_action_logits = model.teacher_forced_action_logits(visual_features, bbox, target)
-            teacher_action_values = model.teacher_forced_action_values(visual_features, bbox, target)
-            action_value_targets = model.action_value_targets(
-                bbox,
-                target,
-                terminal_weight=value_fde_weight,
-                target_scale=value_target_scale,
-            )
             trajectory_loss = trajectory_loss_fn(pred, target)
-            policy_loss = F.cross_entropy(
-                teacher_action_logits.reshape(-1, teacher_action_logits.shape[-1]),
-                action_labels.reshape(-1),
-            )
-            value_loss = F.mse_loss(teacher_action_values, action_value_targets)
-            value_rank_loss = F.cross_entropy(
-                teacher_action_values.reshape(-1, teacher_action_values.shape[-1]),
-                action_labels.reshape(-1),
-            )
-            loss = (
-                trajectory_loss
-                + policy_loss_weight * policy_loss
-                + value_loss_weight * value_loss
-                + value_rank_loss_weight * value_rank_loss
-            )
+            endpoint_loss = trajectory_loss_fn(pred[:, -1], target[:, -1])
+            policy_loss = torch.zeros((), dtype=trajectory_loss.dtype, device=device)
+            value_loss = torch.zeros((), dtype=trajectory_loss.dtype, device=device)
+            value_rank_loss = torch.zeros((), dtype=trajectory_loss.dtype, device=device)
+            if policy_kind == "chunk":
+                loss = trajectory_loss + endpoint_loss_weight * endpoint_loss
+            else:
+                action_labels = model.action_labels(bbox, target)
+                teacher_action_logits = model.teacher_forced_action_logits(visual_features, bbox, target)
+                teacher_action_values = model.teacher_forced_action_values(visual_features, bbox, target)
+                action_value_targets = model.action_value_targets(
+                    bbox,
+                    target,
+                    terminal_weight=value_fde_weight,
+                    target_scale=value_target_scale,
+                )
+                policy_loss = F.cross_entropy(
+                    teacher_action_logits.reshape(-1, teacher_action_logits.shape[-1]),
+                    action_labels.reshape(-1),
+                )
+                value_loss = F.mse_loss(teacher_action_values, action_value_targets)
+                value_rank_loss = F.cross_entropy(
+                    teacher_action_values.reshape(-1, teacher_action_values.shape[-1]),
+                    action_labels.reshape(-1),
+                )
+                loss = (
+                    trajectory_loss
+                    + policy_loss_weight * policy_loss
+                    + value_loss_weight * value_loss
+                    + value_rank_loss_weight * value_rank_loss
+                )
             if not torch.isfinite(loss):
                 raise FloatingPointError(f"Non-finite training loss at epoch {epoch}")
 
@@ -393,6 +427,7 @@ def train(
 
             epoch_loss += loss.item()
             epoch_traj_loss += trajectory_loss.item()
+            epoch_endpoint_loss += endpoint_loss.item()
             epoch_policy_loss += policy_loss.item()
             epoch_value_loss += value_loss.item()
             epoch_value_rank_loss += value_rank_loss.item()
@@ -400,6 +435,7 @@ def train(
 
         avg_loss = epoch_loss / max(n_batches, 1)
         avg_traj_loss = epoch_traj_loss / max(n_batches, 1)
+        avg_endpoint_loss = epoch_endpoint_loss / max(n_batches, 1)
         avg_policy_loss = epoch_policy_loss / max(n_batches, 1)
         avg_value_loss = epoch_value_loss / max(n_batches, 1)
         avg_value_rank_loss = epoch_value_rank_loss / max(n_batches, 1)
@@ -411,34 +447,46 @@ def train(
             elapsed = time.time() - start
             print(
                 f"Epoch {epoch:4d} | loss={avg_loss:.6f} | "
-                f"traj={avg_traj_loss:.6f} policy={avg_policy_loss:.6f} "
+                f"traj={avg_traj_loss:.6f} endpoint={avg_endpoint_loss:.6f} "
+                f"policy={avg_policy_loss:.6f} "
                 f"value={avg_value_loss:.6f} value_rank={avg_value_rank_loss:.6f} "
                 f"qwen_grad={avg_qwen_grad_norm:.6f} | "
                 f"train_ADE={train_metrics['ADE']:.6f} train_FDE={train_metrics['FDE']:.6f} | "
-                f"train_act={train_metrics['action_accuracy']:.3f} "
-                f"train_teacher_act={train_metrics['teacher_action_accuracy']:.3f} "
-                f"train_value_act={train_metrics['value_action_accuracy']:.3f} | "
+                f"train_vel_ADE={train_metrics['baseline_velocity_ADE']:.6f} "
+                f"train_act={metric_text(train_metrics['action_accuracy'])} "
+                f"train_teacher_act={metric_text(train_metrics['teacher_action_accuracy'])} "
+                f"train_value_act={metric_text(train_metrics['value_action_accuracy'])} | "
                 f"eval_ADE={eval_metrics['ADE']:.6f} eval_FDE={eval_metrics['FDE']:.6f} | "
-                f"eval_act={eval_metrics['action_accuracy']:.3f} "
-                f"eval_teacher_act={eval_metrics['teacher_action_accuracy']:.3f} "
-                f"eval_value_act={eval_metrics['value_action_accuracy']:.3f} | "
+                f"eval_vel_ADE={eval_metrics['baseline_velocity_ADE']:.6f} "
+                f"eval_act={metric_text(eval_metrics['action_accuracy'])} "
+                f"eval_teacher_act={metric_text(eval_metrics['teacher_action_accuracy'])} "
+                f"eval_value_act={metric_text(eval_metrics['value_action_accuracy'])} | "
                 f"{elapsed:.1f}s"
             )
             history.append({
                 "epoch": epoch,
                 "loss": avg_loss,
                 "trajectory_loss": avg_traj_loss,
+                "endpoint_loss": avg_endpoint_loss,
                 "policy_loss": avg_policy_loss,
                 "value_loss": avg_value_loss,
                 "value_rank_loss": avg_value_rank_loss,
                 "qwen_grad_norm": avg_qwen_grad_norm,
                 "train_ADE": train_metrics["ADE"],
                 "train_FDE": train_metrics["FDE"],
+                "train_baseline_constant_ADE": train_metrics["baseline_constant_ADE"],
+                "train_baseline_constant_FDE": train_metrics["baseline_constant_FDE"],
+                "train_baseline_velocity_ADE": train_metrics["baseline_velocity_ADE"],
+                "train_baseline_velocity_FDE": train_metrics["baseline_velocity_FDE"],
                 "train_action_accuracy": train_metrics["action_accuracy"],
                 "train_teacher_action_accuracy": train_metrics["teacher_action_accuracy"],
                 "train_value_action_accuracy": train_metrics["value_action_accuracy"],
                 "eval_ADE": eval_metrics["ADE"],
                 "eval_FDE": eval_metrics["FDE"],
+                "eval_baseline_constant_ADE": eval_metrics["baseline_constant_ADE"],
+                "eval_baseline_constant_FDE": eval_metrics["baseline_constant_FDE"],
+                "eval_baseline_velocity_ADE": eval_metrics["baseline_velocity_ADE"],
+                "eval_baseline_velocity_FDE": eval_metrics["baseline_velocity_FDE"],
                 "eval_action_accuracy": eval_metrics["action_accuracy"],
                 "eval_teacher_action_accuracy": eval_metrics["teacher_action_accuracy"],
                 "eval_value_action_accuracy": eval_metrics["value_action_accuracy"],
@@ -450,8 +498,16 @@ def train(
     final = {
         "train_ADE": final_train["ADE"],
         "train_FDE": final_train["FDE"],
+        "train_baseline_constant_ADE": final_train["baseline_constant_ADE"],
+        "train_baseline_constant_FDE": final_train["baseline_constant_FDE"],
+        "train_baseline_velocity_ADE": final_train["baseline_velocity_ADE"],
+        "train_baseline_velocity_FDE": final_train["baseline_velocity_FDE"],
         "eval_ADE": final_eval["ADE"],
         "eval_FDE": final_eval["FDE"],
+        "eval_baseline_constant_ADE": final_eval["baseline_constant_ADE"],
+        "eval_baseline_constant_FDE": final_eval["baseline_constant_FDE"],
+        "eval_baseline_velocity_ADE": final_eval["baseline_velocity_ADE"],
+        "eval_baseline_velocity_FDE": final_eval["baseline_velocity_FDE"],
         "train_action_accuracy": final_train["action_accuracy"],
         "eval_action_accuracy": final_eval["action_accuracy"],
         "train_teacher_action_accuracy": final_train["teacher_action_accuracy"],
@@ -463,13 +519,15 @@ def train(
     print(
         "\nFinal: "
         f"train_ADE={final['train_ADE']:.6f} train_FDE={final['train_FDE']:.6f} | "
-        f"train_act={final['train_action_accuracy']:.3f} "
-        f"train_teacher_act={final['train_teacher_action_accuracy']:.3f} "
-        f"train_value_act={final['train_value_action_accuracy']:.3f} | "
+        f"train_vel_ADE={final['train_baseline_velocity_ADE']:.6f} "
+        f"train_act={metric_text(final['train_action_accuracy'])} "
+        f"train_teacher_act={metric_text(final['train_teacher_action_accuracy'])} "
+        f"train_value_act={metric_text(final['train_value_action_accuracy'])} | "
         f"eval_ADE={final['eval_ADE']:.6f} eval_FDE={final['eval_FDE']:.6f} | "
-        f"eval_act={final['eval_action_accuracy']:.3f} "
-        f"eval_teacher_act={final['eval_teacher_action_accuracy']:.3f} "
-        f"eval_value_act={final['eval_value_action_accuracy']:.3f}"
+        f"eval_vel_ADE={final['eval_baseline_velocity_ADE']:.6f} "
+        f"eval_act={metric_text(final['eval_action_accuracy'])} "
+        f"eval_teacher_act={metric_text(final['eval_teacher_action_accuracy'])} "
+        f"eval_value_act={metric_text(final['eval_value_action_accuracy'])}"
     )
     save_prediction_artifacts(
         model=model,
@@ -490,26 +548,29 @@ def train(
     out_path.write_text(json.dumps(history, indent=2))
     print(f"History saved to {out_path}")
 
-    # Save trainable task weights plus the Qwen tensors updated by this run.
-    checkpoint = {
-        "visual_proj": model.visual_proj.state_dict(),
-        "step_embedding": model.step_embedding.state_dict(),
-        "head": model.head.state_dict(),
-        "value_head": model.value_head.state_dict(),
-        "action_codebook": model.action_codebook.cpu(),
-        "action_stride": model.action_stride,
-        "qwen_lr": QWEN_LR,
-        "adam_eps": ADAM_EPS,
-        "grad_clip_norm": GRAD_CLIP_NORM,
-        "qwen_trainable_names": names,
-        "qwen_trainable": {
-            name: param.detach().cpu()
-            for name, param in model.vlm.named_parameters()
-            if param.requires_grad
-        },
-    }
-    torch.save(checkpoint, "trajectory_head.pt")
-    print("Trainable weights saved to trajectory_head.pt")
+    if save_checkpoint:
+        # Save trainable task weights plus the Qwen tensors updated by this run.
+        checkpoint = {
+            "visual_proj": model.visual_proj.state_dict(),
+            "policy_kind": policy_kind,
+            "chunk_head": model.chunk_head.state_dict(),
+            "step_embedding": model.step_embedding.state_dict(),
+            "head": model.head.state_dict(),
+            "value_head": model.value_head.state_dict(),
+            "action_codebook": model.action_codebook.cpu(),
+            "action_stride": model.action_stride,
+            "qwen_lr": QWEN_LR,
+            "adam_eps": ADAM_EPS,
+            "grad_clip_norm": GRAD_CLIP_NORM,
+            "qwen_trainable_names": names,
+            "qwen_trainable": {
+                name: param.detach().cpu()
+                for name, param in model.vlm.named_parameters()
+                if param.requires_grad
+            },
+        }
+        torch.save(checkpoint, "trajectory_head.pt")
+        print("Trainable weights saved to trajectory_head.pt")
 
     return final
 
@@ -535,6 +596,8 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--overfit-samples", type=int, default=0)
     parser.add_argument("--sample-selection", default="first", choices=["first", "max_motion"])
+    parser.add_argument("--policy-kind", default="chunk", choices=["chunk", "codebook"])
+    parser.add_argument("--endpoint-loss-weight", type=float, default=ENDPOINT_LOSS_WEIGHT)
     parser.add_argument("--policy-loss-weight", type=float, default=0.05)
     parser.add_argument("--value-loss-weight", type=float, default=1.0)
     parser.add_argument("--value-rank-loss-weight", type=float, default=1.0)
@@ -543,6 +606,7 @@ if __name__ == "__main__":
     parser.add_argument("--mcts-simulations", type=int, default=0)
     parser.add_argument("--mcts-top-k", type=int, default=8)
     parser.add_argument("--mcts-c-puct", type=float, default=1.5)
+    parser.add_argument("--save-checkpoint", action="store_true")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -566,6 +630,8 @@ if __name__ == "__main__":
         seed=args.seed,
         overfit_samples=args.overfit_samples,
         sample_selection=args.sample_selection,
+        policy_kind=args.policy_kind,
+        endpoint_loss_weight=args.endpoint_loss_weight,
         policy_loss_weight=args.policy_loss_weight,
         value_loss_weight=args.value_loss_weight,
         value_rank_loss_weight=args.value_rank_loss_weight,
@@ -574,5 +640,6 @@ if __name__ == "__main__":
         mcts_simulations=args.mcts_simulations,
         mcts_top_k=args.mcts_top_k,
         mcts_c_puct=args.mcts_c_puct,
+        save_checkpoint=args.save_checkpoint,
         device=args.device,
     )

@@ -14,12 +14,14 @@ and minimal initial training goal.
 Initial real-data run: deterministic SoccerNet `train` split sequence subsets
 with seed `7`, using `10%` of sequences for training and `2%` for held-out eval.
 The run writes `sequence_manifest.json`, `training_history.json`,
-`trajectory_head.pt`, `trajectory_preview.png`, and `trajectory_rollouts.json`.
+`trajectory_preview.png`, and `trajectory_rollouts.json`. Add
+`--save-checkpoint` when you also want the large Qwen visual-stack checkpoint
+copied to the Modal volume as `trajectory_head.pt`.
 
-Run the first 10%/2% Modal job with:
+Run the fixed-seed 10%/2% ACT-head Modal job with:
 
 ```bash
-uvx modal run modal_train.py --split train --train-fraction 0.10 --eval-fraction 0.02 --seed 7 --epochs 1
+uvx modal run modal_train.py --split train --train-fraction 0.10 --eval-fraction 0.02 --input-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --epochs 3 --batch-size 2 --lr 0.001 --endpoint-loss-weight 1.0 --mcts-simulations 0 --seed 7
 ```
 
 Artifacts are copied to the `soccernet-tracking` Modal volume, including
@@ -38,8 +40,11 @@ Deploy the hosted visualizer with:
 uvx modal deploy modal_visualize.py
 ```
 
-Run the current one-sample full-Qwen-visual + learned-value MCTS overfit gate on H100 with:
+Current hosted visualizer:
+[rl-trainer-visualizer](https://koogle-frick--rl-trainer-visualizer-visualizer.modal.run)
+
+Run the current one-sample full-Qwen-visual + ACT chunk-head overfit gate on H100 with:
 
 ```bash
-uvx modal run modal_train.py --split train --train-sequence-count 1 --eval-sequence-count 1 --input-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --overfit-samples 1 --sample-selection max_motion --epochs 200 --batch-size 1 --lr 0.003 --policy-loss-weight 1.0 --value-loss-weight 1.0 --value-rank-loss-weight 1.0 --value-fde-weight 0.5 --value-target-scale 10.0 --mcts-simulations 192 --mcts-top-k 10 --mcts-c-puct 1.5 --seed 7
+uvx modal run modal_train.py --split train --train-sequence-count 1 --eval-sequence-count 1 --input-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --overfit-samples 1 --sample-selection max_motion --epochs 500 --batch-size 1 --lr 0.003 --endpoint-loss-weight 1.0 --mcts-simulations 0 --seed 7
 ```

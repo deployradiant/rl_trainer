@@ -1,4 +1,4 @@
-"""Qwen VLM backbone + football relative-motion policy/value heads."""
+"""Qwen VLM backbone + football trajectory policy/value heads."""
 
 from math import ceil, pi
 
@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+
+from models.action_chunk import ActionChunkHead
 
 
 def build_relative_action_codebook() -> torch.Tensor:
@@ -50,14 +52,18 @@ class QwenFootballModel(nn.Module):
         horizon: int = 25,
         input_frames: int = 5,
         action_stride: int = 5,
+        policy_kind: str = "chunk",
         proj_dim: int = 512,
         step_dim: int = 32,
         speed_floor: float = 0.0015,
     ):
         super().__init__()
+        if policy_kind not in {"chunk", "codebook"}:
+            raise ValueError("policy_kind must be 'chunk' or 'codebook'")
         self.input_frames = input_frames
         self.horizon = horizon
         self.action_stride = action_stride
+        self.policy_kind = policy_kind
         self.rollout_steps = ceil(horizon / action_stride)
         self.speed_floor = speed_floor
         self.qwen_has_trainable_parameters = False
@@ -90,6 +96,12 @@ class QwenFootballModel(nn.Module):
         head_input = proj_dim + input_frames * 4 + step_dim
         self.head = RelativeMotionPolicyHead(head_input, action_count=len(self.action_codebook))
         self.value_head = RelativeMotionPolicyHead(head_input, action_count=len(self.action_codebook))
+        self.chunk_head = ActionChunkHead(
+            state_dim=proj_dim + input_frames * 4,
+            horizon=horizon,
+            step_dim=step_dim,
+        )
+        self.configure_policy_training()
 
     def configure_qwen_training(self) -> None:
         """Train Qwen's full visual stack by default."""
@@ -111,6 +123,20 @@ class QwenFootballModel(nn.Module):
                 param.requires_grad = True
                 matched += param.numel()
         return matched
+
+    def configure_policy_training(self) -> None:
+        """Only train the active task head."""
+        if self.policy_kind == "chunk":
+            inactive_modules = [self.head, self.value_head, self.step_embedding]
+        else:
+            inactive_modules = [self.chunk_head]
+        for module in inactive_modules:
+            for param in module.parameters():
+                param.requires_grad = False
+
+    def project_visual_features(self, visual_features: torch.Tensor) -> torch.Tensor:
+        B = visual_features.shape[0]
+        return self.visual_proj(visual_features.reshape(B, -1))
 
     def _policy_features(
         self,
@@ -189,10 +215,50 @@ class QwenFootballModel(nn.Module):
         return_outputs: bool = False,
         greedy: bool = False,
     ) -> torch.Tensor | dict[str, torch.Tensor]:
+        if self.policy_kind == "chunk":
+            return self.predict_chunk_from_visual_features(
+                visual_features=visual_features,
+                player_bbox=player_bbox,
+                return_outputs=return_outputs,
+            )
+        return self.predict_codebook_from_visual_features(
+            visual_features=visual_features,
+            player_bbox=player_bbox,
+            return_outputs=return_outputs,
+            greedy=greedy,
+        )
+
+    def predict_chunk_from_visual_features(
+        self,
+        visual_features: torch.Tensor,
+        player_bbox: torch.Tensor,
+        return_outputs: bool = False,
+    ) -> torch.Tensor | dict[str, torch.Tensor]:
+        """Predict a full future trajectory as a residual over recent velocity."""
+        visual_proj = self.project_visual_features(visual_features)
+        residual_xy = self.chunk_head(visual_proj, player_bbox)
+        base_xy = self._constant_velocity_future(player_bbox)
+        future_xy = base_xy + residual_xy
+        if return_outputs:
+            return {"future_xy": future_xy, "residual_xy": residual_xy, "base_xy": base_xy}
+        return future_xy
+
+    def _constant_velocity_future(self, player_bbox: torch.Tensor) -> torch.Tensor:
+        xy = player_bbox[:, :, :2]
+        velocity = self._recent_velocity(xy)
+        steps = torch.arange(1, self.horizon + 1, dtype=xy.dtype, device=xy.device).view(1, self.horizon, 1)
+        return xy[:, -1:].expand(-1, self.horizon, -1) + velocity.unsqueeze(1) * steps
+
+    def predict_codebook_from_visual_features(
+        self,
+        visual_features: torch.Tensor,
+        player_bbox: torch.Tensor,
+        return_outputs: bool = False,
+        greedy: bool = False,
+    ) -> torch.Tensor | dict[str, torch.Tensor]:
         """Roll out future centers from cached Qwen visual features and action logits."""
-        B = visual_features.shape[0]
-        visual_flat = visual_features.reshape(B, -1)
-        visual_proj = self.visual_proj(visual_flat)
+        visual_proj = self.project_visual_features(visual_features)
+        B = visual_proj.shape[0]
         bbox_state = player_bbox
         current_xy = bbox_state[:, -1, :2]
         future_points = []
@@ -232,9 +298,7 @@ class QwenFootballModel(nn.Module):
         future_xy: torch.Tensor,
     ) -> torch.Tensor:
         """Return action logits at ground-truth rollout states."""
-        B = visual_features.shape[0]
-        visual_flat = visual_features.reshape(B, -1)
-        visual_proj = self.visual_proj(visual_flat)
+        visual_proj = self.project_visual_features(visual_features)
         bbox_state = player_bbox
         logits_by_step = []
 
@@ -255,9 +319,7 @@ class QwenFootballModel(nn.Module):
         future_xy: torch.Tensor,
     ) -> torch.Tensor:
         """Return learned action values at ground-truth rollout states."""
-        B = visual_features.shape[0]
-        visual_flat = visual_features.reshape(B, -1)
-        visual_proj = self.visual_proj(visual_flat)
+        visual_proj = self.project_visual_features(visual_features)
         bbox_state = player_bbox
         values_by_step = []
 
