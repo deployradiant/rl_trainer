@@ -91,7 +91,9 @@ class QwenFootballModel(nn.Module):
         # Policy head: visual features + rolling bbox state -> relative action logits.
         head_input = proj_dim + input_frames * 4 + step_dim
         self.head = RelativeMotionPolicyHead(head_input, action_count=len(self.action_codebook))
-        self.value_head = RelativeMotionPolicyHead(head_input, action_count=len(self.action_codebook))
+        self.value_head = RelativeMotionPolicyHead(
+            head_input, action_count=len(self.action_codebook)
+        )
 
     def _policy_features(
         self,
@@ -129,12 +131,12 @@ class QwenFootballModel(nn.Module):
         Returns:
             features: [B, T, D] pooled visual features
         """
-        B, T, C, H, W = frames.shape
+        batch_size, frame_count = frames.shape[:2]
 
         # Convert to PIL images for the Qwen image processor
         pil_images = []
-        for b in range(B):
-            for t in range(T):
+        for b in range(batch_size):
+            for t in range(frame_count):
                 img = frames[b, t].clamp(0, 1).permute(1, 2, 0).cpu().numpy()
                 pil_images.append(Image.fromarray((img * 255).astype("uint8")))
 
@@ -155,12 +157,12 @@ class QwenFootballModel(nn.Module):
         features = []
         idx = 0
         for n in tokens_per_img:
-            pooled = hidden_states[idx:idx + n].mean(dim=0)  # [D]
+            pooled = hidden_states[idx : idx + n].mean(dim=0)  # [D]
             features.append(pooled)
             idx += n
 
         features = torch.stack(features)  # [B*T, D]
-        features = features.view(B, T, -1)  # [B, T, D]
+        features = features.view(batch_size, frame_count, -1)  # [B, T, D]
         return features.float()
 
     def predict_from_visual_features(
@@ -263,15 +265,20 @@ class QwenFootballModel(nn.Module):
         speed = raw_speed.clamp_min(self.speed_floor)
         fallback_direction = torch.zeros_like(velocity)
         fallback_direction[:, 0] = 1.0
-        direction = torch.where(raw_speed > self.speed_floor, velocity / raw_speed.clamp_min(1e-8), fallback_direction)
+        direction = torch.where(
+            raw_speed > self.speed_floor, velocity / raw_speed.clamp_min(1e-8), fallback_direction
+        )
         cos = torch.cos(angles).unsqueeze(0)
         sin = torch.sin(angles).unsqueeze(0)
         dx = direction[:, :1]
         dy = direction[:, 1:]
-        rotated = torch.stack([
-            dx * cos - dy * sin,
-            dx * sin + dy * cos,
-        ], dim=-1).squeeze(1)
+        rotated = torch.stack(
+            [
+                dx * cos - dy * sin,
+                dx * sin + dy * cos,
+            ],
+            dim=-1,
+        ).squeeze(1)
         return rotated * speed.unsqueeze(1) * speed_multipliers.view(1, -1, 1)
 
     def action_labels(self, player_bbox: torch.Tensor, future_xy: torch.Tensor) -> torch.Tensor:

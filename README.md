@@ -39,6 +39,24 @@ Deploy the hosted visualizer with:
 uvx modal deploy modal_visualize.py
 ```
 
+## Developer checks
+
+Install the commit hooks with:
+
+```bash
+uv tool install pre-commit==4.6.0
+pre-commit install
+```
+
+Run the full local check suite with:
+
+```bash
+pre-commit run --all-files
+```
+
+The hooks run `ruff check --fix` and `ruff format` before commits. Ruff also
+flags unused imports, unused local variables, and unused unpacked variables.
+
 Run the current one-sample learned-value MCTS overfit gate with:
 
 ```bash

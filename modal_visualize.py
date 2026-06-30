@@ -66,22 +66,24 @@ def visualizer():
         latest = history[-1] if history else {}
         rollout_updated_at = rollouts_path.stat().st_mtime if rollouts_path.exists() else None
 
-        return JSONResponse({
-            "manifest": manifest,
-            "history": history,
-            "latest": latest,
-            "rollouts": {
-                "available": rollouts_path.exists(),
-                "updated_at": rollout_updated_at,
-                "data": rollouts,
-                "frame_url": "/frames/{sequence}/{frame_number}.jpg",
-            },
-            "preview": {
-                "url": "/artifacts/trajectory_preview.png",
-                "available": preview_path.exists(),
-                "updated_at": preview_path.stat().st_mtime if preview_path.exists() else None,
-            },
-        })
+        return JSONResponse(
+            {
+                "manifest": manifest,
+                "history": history,
+                "latest": latest,
+                "rollouts": {
+                    "available": rollouts_path.exists(),
+                    "updated_at": rollout_updated_at,
+                    "data": rollouts,
+                    "frame_url": "/frames/{sequence}/{frame_number}.jpg",
+                },
+                "preview": {
+                    "url": "/artifacts/trajectory_preview.png",
+                    "available": preview_path.exists(),
+                    "updated_at": preview_path.stat().st_mtime if preview_path.exists() else None,
+                },
+            }
+        )
 
     @server.get("/api/rollouts")
     def rollouts():

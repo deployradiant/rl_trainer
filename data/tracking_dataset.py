@@ -4,8 +4,8 @@ Data format: MOT-style with per-frame bounding boxes in pixel coordinates.
 Each sequence has 750 frames at 25fps (30s clips), 1920x1080 JPG images.
 """
 
-import io
 import bisect
+import io
 import zipfile
 from dataclasses import dataclass
 from math import ceil
@@ -20,8 +20,8 @@ from torch.utils.data import Dataset
 @dataclass
 class TrackletInfo:
     track_id: int
-    role: str       # "player team left", "player team right", "ball", "referee", ...
-    jersey: str     # jersey number or identifier
+    role: str  # "player team left", "player team right", "ball", "referee", ...
+    jersey: str  # jersey number or identifier
 
 
 def parse_gameinfo(content: str) -> dict:
@@ -125,7 +125,7 @@ def choose_sequence_subsets(
             f"Need at least {n_train + n_eval} sequences for train/eval subsets, "
             f"found {len(shuffled)}"
         )
-    return sorted(shuffled[:n_train]), sorted(shuffled[n_train:n_train + n_eval])
+    return sorted(shuffled[:n_train]), sorted(shuffled[n_train : n_train + n_eval])
 
 
 def choose_sequence_subsets_by_count(
@@ -149,7 +149,7 @@ def choose_sequence_subsets_by_count(
 
     shuffled = list(sequences)
     random.Random(seed).shuffle(shuffled)
-    return sorted(shuffled[:train_count]), sorted(shuffled[train_count:train_count + eval_count])
+    return sorted(shuffled[:train_count]), sorted(shuffled[train_count : train_count + eval_count])
 
 
 class SoccerNetTrackingDataset(Dataset):
@@ -215,7 +215,8 @@ class SoccerNetTrackingDataset(Dataset):
 
         # Filter to valid player tracklets
         self.tracklets = {
-            tid: info for tid, info in self.gameinfo["tracklets"].items()
+            tid: info
+            for tid, info in self.gameinfo["tracklets"].items()
             if player_filter in info.role
         }
 
@@ -283,10 +284,14 @@ class SoccerNetTrackingDataset(Dataset):
         for f in range(start, start + self.input_frames):
             x, y, w, h = track[f]
             cx, cy = bbox_center((x, y, w, h))
-            bboxes.append([
-                cx / self.img_width, cy / self.img_height,
-                w / self.img_width, h / self.img_height,
-            ])
+            bboxes.append(
+                [
+                    cx / self.img_width,
+                    cy / self.img_height,
+                    w / self.img_width,
+                    h / self.img_height,
+                ]
+            )
         bboxes = torch.tensor(bboxes, dtype=torch.float32)  # [T, 4]
 
         # Future trajectory (normalized centers)

@@ -4,6 +4,7 @@ data/sample/
 data/sample_clip/
 __pycache__/
 *.pyc
+.ruff_cache/
 *.pt
 *.json
 training_history.json
