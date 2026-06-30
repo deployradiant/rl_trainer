@@ -76,10 +76,12 @@ def run_overfit(
         print(f"Downloading SoccerNet tracking {split} split...")
         os.makedirs(data_root, exist_ok=True)
         from SoccerNet.Downloader import SoccerNetDownloader
+
         dl = SoccerNetDownloader(LocalDirectory="/data/SoccerNet")
         dl.downloadDataTask(task="tracking-2023", split=[split], verbose=True)
         # Move to expected path
         import shutil
+
         shutil.move(f"/data/SoccerNet/tracking-2023/{split}.zip", zip_path)
         data_vol.commit()
 
@@ -118,6 +120,7 @@ def run_overfit(
 
     # Save artifacts to volume
     import shutil
+
     for fname in [
         "sequence_manifest.json",
         "training_history.json",

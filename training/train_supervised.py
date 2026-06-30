@@ -147,13 +147,15 @@ def cache_dataset_visual_features(
             visual_features = model.extract_visual_features(frames).cpu()
             features.append(visual_features)
             for i in range(visual_features.shape[0]):
-                cached_samples.append({
-                    "player_bbox": batch["player_bbox"][i].cpu(),
-                    "future_xy": batch["future_xy"][i].cpu(),
-                    "sequence": batch["sequence"][i],
-                    "track_id": int(batch["track_id"][i]),
-                    "start_frame": int(batch["start_frame"][i]),
-                })
+                cached_samples.append(
+                    {
+                        "player_bbox": batch["player_bbox"][i].cpu(),
+                        "future_xy": batch["future_xy"][i].cpu(),
+                        "sequence": batch["sequence"][i],
+                        "track_id": int(batch["track_id"][i]),
+                        "start_frame": int(batch["start_frame"][i]),
+                    }
+                )
             if batch_idx == 1 or batch_idx == len(loader) or batch_idx % 10 == 0:
                 print(f"Cached visual feature batch {batch_idx}/{len(loader)}")
     if was_training:
@@ -282,8 +284,7 @@ def train(
         train_dataset = Subset(base_train_dataset, selected_indices)
         eval_dataset = Subset(base_train_dataset, selected_indices)
         print(
-            f"Overfit subset: {len(train_dataset)} {sample_selection} sample(s): "
-            f"{selected_samples}"
+            f"Overfit subset: {len(train_dataset)} {sample_selection} sample(s): {selected_samples}"
         )
     else:
         eval_dataset = build_dataset(
@@ -397,8 +398,12 @@ def train(
             )
             pred = outputs["future_xy"]
             action_labels = model.action_labels(bbox, target)
-            teacher_action_logits = model.teacher_forced_action_logits(visual_features, bbox, target)
-            teacher_action_values = model.teacher_forced_action_values(visual_features, bbox, target)
+            teacher_action_logits = model.teacher_forced_action_logits(
+                visual_features, bbox, target
+            )
+            teacher_action_values = model.teacher_forced_action_values(
+                visual_features, bbox, target
+            )
             action_value_targets = model.action_value_targets(
                 bbox,
                 target,
@@ -457,24 +462,26 @@ def train(
                 f"eval_value_act={eval_metrics['value_action_accuracy']:.3f} | "
                 f"{elapsed:.1f}s"
             )
-            history.append({
-                "epoch": epoch,
-                "loss": avg_loss,
-                "trajectory_loss": avg_traj_loss,
-                "policy_loss": avg_policy_loss,
-                "value_loss": avg_value_loss,
-                "value_rank_loss": avg_value_rank_loss,
-                "train_ADE": train_metrics["ADE"],
-                "train_FDE": train_metrics["FDE"],
-                "train_action_accuracy": train_metrics["action_accuracy"],
-                "train_teacher_action_accuracy": train_metrics["teacher_action_accuracy"],
-                "train_value_action_accuracy": train_metrics["value_action_accuracy"],
-                "eval_ADE": eval_metrics["ADE"],
-                "eval_FDE": eval_metrics["FDE"],
-                "eval_action_accuracy": eval_metrics["action_accuracy"],
-                "eval_teacher_action_accuracy": eval_metrics["teacher_action_accuracy"],
-                "eval_value_action_accuracy": eval_metrics["value_action_accuracy"],
-            })
+            history.append(
+                {
+                    "epoch": epoch,
+                    "loss": avg_loss,
+                    "trajectory_loss": avg_traj_loss,
+                    "policy_loss": avg_policy_loss,
+                    "value_loss": avg_value_loss,
+                    "value_rank_loss": avg_value_rank_loss,
+                    "train_ADE": train_metrics["ADE"],
+                    "train_FDE": train_metrics["FDE"],
+                    "train_action_accuracy": train_metrics["action_accuracy"],
+                    "train_teacher_action_accuracy": train_metrics["teacher_action_accuracy"],
+                    "train_value_action_accuracy": train_metrics["value_action_accuracy"],
+                    "eval_ADE": eval_metrics["ADE"],
+                    "eval_FDE": eval_metrics["FDE"],
+                    "eval_action_accuracy": eval_metrics["action_accuracy"],
+                    "eval_teacher_action_accuracy": eval_metrics["teacher_action_accuracy"],
+                    "eval_value_action_accuracy": eval_metrics["value_action_accuracy"],
+                }
+            )
 
     # Final eval
     final_train = evaluate(model, loader, device)
@@ -523,12 +530,14 @@ def train(
 
     # Save model head
     torch.save(
-        {"visual_proj": model.visual_proj.state_dict(),
-         "step_embedding": model.step_embedding.state_dict(),
-         "head": model.head.state_dict(),
-         "value_head": model.value_head.state_dict(),
-         "action_codebook": model.action_codebook.cpu(),
-         "action_stride": model.action_stride},
+        {
+            "visual_proj": model.visual_proj.state_dict(),
+            "step_embedding": model.step_embedding.state_dict(),
+            "head": model.head.state_dict(),
+            "value_head": model.value_head.state_dict(),
+            "action_codebook": model.action_codebook.cpu(),
+            "action_stride": model.action_stride,
+        },
         "trajectory_head.pt",
     )
     print("Head weights saved to trajectory_head.pt")

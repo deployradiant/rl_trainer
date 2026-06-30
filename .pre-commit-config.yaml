@@ -1,0 +1,31 @@
+default_language_version:
+  python: python3
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check --fix
+        entry: ruff check --fix
+        language: python
+        types_or: [python, pyi]
+        additional_dependencies:
+          - ruff==0.15.20
+
+      - id: ruff-format
+        name: ruff format
+        entry: ruff format
+        language: python
+        types_or: [python, pyi]
+        additional_dependencies:
+          - ruff==0.15.20
+
+      - id: vulture
+        name: vulture unused-code check
+        entry: vulture
+        language: python
+        pass_filenames: false
+        args:
+          - --config=pyproject.toml
+        additional_dependencies:
+          - vulture==2.16

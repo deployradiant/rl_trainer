@@ -86,7 +86,9 @@ class TrajectoryMCTS:
                 str(action): {
                     "visits": child.visits,
                     "value": child.value,
-                    "learned_action_value": child.value_estimates[-1] if child.value_estimates else 0.0,
+                    "learned_action_value": child.value_estimates[-1]
+                    if child.value_estimates
+                    else 0.0,
                     "prior": root.priors.get(action, 0.0),
                 }
                 for action, child in sorted(root.children.items())

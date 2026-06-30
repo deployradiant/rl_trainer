@@ -111,16 +111,24 @@ def build_rollout_artifact(
                     top_k=mcts_top_k,
                     c_puct=mcts_c_puct,
                 )
-            teacher_action_logits = model.teacher_forced_action_logits(
-                visual_features,
-                sample["player_bbox"].unsqueeze(0).to(device),
-                sample["future_xy"].unsqueeze(0).to(device),
-            )[0].detach().cpu()
-            teacher_action_values = model.teacher_forced_action_values(
-                visual_features,
-                sample["player_bbox"].unsqueeze(0).to(device),
-                sample["future_xy"].unsqueeze(0).to(device),
-            )[0].detach().cpu()
+            teacher_action_logits = (
+                model.teacher_forced_action_logits(
+                    visual_features,
+                    sample["player_bbox"].unsqueeze(0).to(device),
+                    sample["future_xy"].unsqueeze(0).to(device),
+                )[0]
+                .detach()
+                .cpu()
+            )
+            teacher_action_values = (
+                model.teacher_forced_action_values(
+                    visual_features,
+                    sample["player_bbox"].unsqueeze(0).to(device),
+                    sample["future_xy"].unsqueeze(0).to(device),
+                )[0]
+                .detach()
+                .cpu()
+            )
     finally:
         if was_training:
             model.train()
@@ -129,15 +137,21 @@ def build_rollout_artifact(
     input_bboxes = sample["player_bbox"].numpy()
     sample_ade = ade(pred, target)
     sample_fde = fde(pred, target)
-    action_labels = model.action_labels(
-        sample["player_bbox"].unsqueeze(0).to(device),
-        sample["future_xy"].unsqueeze(0).to(device),
-    )[0].detach().cpu()
+    action_labels = (
+        model.action_labels(
+            sample["player_bbox"].unsqueeze(0).to(device),
+            sample["future_xy"].unsqueeze(0).to(device),
+        )[0]
+        .detach()
+        .cpu()
+    )
     action_pred = action_logits.argmax(dim=-1)
     teacher_action_pred = teacher_action_logits.argmax(dim=-1)
     value_action_pred = teacher_action_values.argmax(dim=-1)
     sample_action_accuracy = float((action_pred == action_labels).float().mean().item())
-    sample_teacher_action_accuracy = float((teacher_action_pred == action_labels).float().mean().item())
+    sample_teacher_action_accuracy = float(
+        (teacher_action_pred == action_labels).float().mean().item()
+    )
     sample_value_action_accuracy = float((value_action_pred == action_labels).float().mean().item())
 
     frame = sample["frames"][-1].permute(1, 2, 0).numpy()
@@ -174,12 +188,16 @@ def build_rollout_artifact(
         draw.ellipse([point[0] - 2, point[1] - 2, point[0] + 2, point[1] + 2], fill=(255, 80, 80))
     if mcts is not None:
         for point in mcts_pixels[1::4]:
-            draw.ellipse([point[0] - 2, point[1] - 2, point[0] + 2, point[1] + 2], fill=(80, 180, 255))
+            draw.ellipse(
+                [point[0] - 2, point[1] - 2, point[0] + 2, point[1] + 2], fill=(80, 180, 255)
+            )
     draw.text((8, 8), "green=actual red=pred blue=mcts", fill=(255, 255, 255))
 
     start_frame = int(sample["start_frame"])
     input_frame_numbers = list(range(start_frame, start_frame + input_frames))
-    future_frame_numbers = list(range(start_frame + input_frames, start_frame + input_frames + horizon))
+    future_frame_numbers = list(
+        range(start_frame + input_frames, start_frame + input_frames + horizon)
+    )
     input_centers = input_bboxes[:, :2]
     actual_path = np.concatenate([input_centers, target], axis=0)
     pred_path = np.concatenate([current_xy, pred], axis=0)
@@ -222,12 +240,16 @@ def build_rollout_artifact(
             "root_visits": mcts["root_visits"],
             "root_children": mcts["root_children"],
         }
-        rollout["metrics"].update({
-            "mcts_ADE": mcts["ADE"],
-            "mcts_FDE": mcts["FDE"],
-            "mcts_displacement": float(np.linalg.norm(mcts["future_xy"][-1] - input_centers[-1])),
-            "mcts_action_accuracy": mcts["action_accuracy"],
-        })
+        rollout["metrics"].update(
+            {
+                "mcts_ADE": mcts["ADE"],
+                "mcts_FDE": mcts["FDE"],
+                "mcts_displacement": float(
+                    np.linalg.norm(mcts["future_xy"][-1] - input_centers[-1])
+                ),
+                "mcts_action_accuracy": mcts["action_accuracy"],
+            }
+        )
     return rollout, image
 
 
