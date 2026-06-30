@@ -60,6 +60,7 @@ class QwenFootballModel(nn.Module):
         step_dim: int = 32,
         speed_floor: float = 0.0015,
         flow_steps: int = 8,
+        flow_noise_scale: float = 0.05,
     ):
         super().__init__()
         if policy_kind not in {"chunk", "codebook", "flow"}:
@@ -74,6 +75,7 @@ class QwenFootballModel(nn.Module):
         self.rollout_steps = ceil(horizon / action_stride)
         self.speed_floor = speed_floor
         self.flow_steps = flow_steps
+        self.flow_noise_scale = flow_noise_scale
         self.qwen_has_trainable_parameters = False
 
         # Load Qwen VLM
@@ -306,7 +308,7 @@ class QwenFootballModel(nn.Module):
         base_xy = self._constant_velocity_future(player_bbox)
         target_residual = future_xy - base_xy
         if noise is None:
-            noise = torch.randn_like(target_residual)
+            noise = torch.randn_like(target_residual) * self.flow_noise_scale
         if t is None:
             t = torch.rand(target_residual.shape[0], dtype=target_residual.dtype, device=target_residual.device)
         t_view = t.view(target_residual.shape[0], 1, 1)

@@ -216,6 +216,7 @@ def train(
     value_fde_weight: float = 0.5,
     value_target_scale: float = 10.0,
     flow_steps: int = 8,
+    flow_noise_scale: float = 0.05,
     model_name: str = "Qwen/Qwen2-VL-2B-Instruct",
     device: str = "cuda",
     log_every: int = 10,
@@ -328,6 +329,7 @@ def train(
         "value_fde_weight": value_fde_weight,
         "value_target_scale": value_target_scale,
         "flow_steps": flow_steps,
+        "flow_noise_scale": flow_noise_scale,
         "qwen_lr": QWEN_LR,
         "adam_eps": ADAM_EPS,
         "grad_clip_norm": GRAD_CLIP_NORM,
@@ -347,6 +349,7 @@ def train(
         action_stride=action_stride,
         policy_kind=policy_kind,
         flow_steps=flow_steps,
+        flow_noise_scale=flow_noise_scale,
     )
     model.to(device)
     tracking_model = TrackingChunkBaseline(horizon=horizon)
@@ -643,6 +646,7 @@ def train(
             "action_codebook": model.action_codebook.cpu(),
             "action_stride": model.action_stride,
             "flow_steps": model.flow_steps,
+            "flow_noise_scale": model.flow_noise_scale,
             "qwen_lr": QWEN_LR,
             "adam_eps": ADAM_EPS,
             "grad_clip_norm": GRAD_CLIP_NORM,
@@ -690,6 +694,7 @@ if __name__ == "__main__":
     parser.add_argument("--value-fde-weight", type=float, default=0.5)
     parser.add_argument("--value-target-scale", type=float, default=10.0)
     parser.add_argument("--flow-steps", type=int, default=8)
+    parser.add_argument("--flow-noise-scale", type=float, default=0.05)
     parser.add_argument("--mcts-simulations", type=int, default=0)
     parser.add_argument("--mcts-top-k", type=int, default=8)
     parser.add_argument("--mcts-c-puct", type=float, default=1.5)
@@ -727,6 +732,7 @@ if __name__ == "__main__":
         value_fde_weight=args.value_fde_weight,
         value_target_scale=args.value_target_scale,
         flow_steps=args.flow_steps,
+        flow_noise_scale=args.flow_noise_scale,
         mcts_simulations=args.mcts_simulations,
         mcts_top_k=args.mcts_top_k,
         mcts_c_puct=args.mcts_c_puct,
