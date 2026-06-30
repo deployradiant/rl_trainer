@@ -8,6 +8,7 @@ from PIL import Image
 from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
 from models.action_chunk import ActionChunkHead
+from models.flow_matching import FlowMatchingChunkHead
 from models.kinematics import KINEMATIC_FEATURE_DIM, constant_velocity_future
 
 
@@ -58,10 +59,11 @@ class QwenFootballModel(nn.Module):
         proj_dim: int = 512,
         step_dim: int = 32,
         speed_floor: float = 0.0015,
+        flow_steps: int = 8,
     ):
         super().__init__()
-        if policy_kind not in {"chunk", "codebook"}:
-            raise ValueError("policy_kind must be 'chunk' or 'codebook'")
+        if policy_kind not in {"chunk", "codebook", "flow"}:
+            raise ValueError("policy_kind must be 'chunk', 'codebook', or 'flow'")
         self.input_frames = input_frames
         self.visual_frames = visual_frames or input_frames
         if self.visual_frames <= 0 or self.visual_frames > self.input_frames:
@@ -71,6 +73,7 @@ class QwenFootballModel(nn.Module):
         self.policy_kind = policy_kind
         self.rollout_steps = ceil(horizon / action_stride)
         self.speed_floor = speed_floor
+        self.flow_steps = flow_steps
         self.qwen_has_trainable_parameters = False
 
         # Load Qwen VLM
@@ -106,6 +109,11 @@ class QwenFootballModel(nn.Module):
             horizon=horizon,
             step_dim=step_dim,
         )
+        self.flow_head = FlowMatchingChunkHead(
+            state_dim=proj_dim + input_frames * KINEMATIC_FEATURE_DIM,
+            horizon=horizon,
+            step_dim=step_dim,
+        )
         self.configure_policy_training()
 
     def configure_qwen_training(self) -> None:
@@ -132,9 +140,11 @@ class QwenFootballModel(nn.Module):
     def configure_policy_training(self) -> None:
         """Only train the active task head."""
         if self.policy_kind == "chunk":
-            inactive_modules = [self.head, self.value_head, self.step_embedding]
+            inactive_modules = [self.head, self.value_head, self.step_embedding, self.flow_head]
+        elif self.policy_kind == "flow":
+            inactive_modules = [self.head, self.value_head, self.step_embedding, self.chunk_head]
         else:
-            inactive_modules = [self.chunk_head]
+            inactive_modules = [self.chunk_head, self.flow_head]
         for module in inactive_modules:
             for param in module.parameters():
                 param.requires_grad = False
@@ -226,6 +236,12 @@ class QwenFootballModel(nn.Module):
                 player_bbox=player_bbox,
                 return_outputs=return_outputs,
             )
+        if self.policy_kind == "flow":
+            return self.predict_flow_from_visual_features(
+                visual_features=visual_features,
+                player_bbox=player_bbox,
+                return_outputs=return_outputs,
+            )
         return self.predict_codebook_from_visual_features(
             visual_features=visual_features,
             player_bbox=player_bbox,
@@ -247,6 +263,65 @@ class QwenFootballModel(nn.Module):
         if return_outputs:
             return {"future_xy": future_xy, "residual_xy": residual_xy, "base_xy": base_xy}
         return future_xy
+
+    def predict_flow_from_visual_features(
+        self,
+        visual_features: torch.Tensor,
+        player_bbox: torch.Tensor,
+        return_outputs: bool = False,
+        initial_residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | dict[str, torch.Tensor]:
+        """Sample a residual chunk by integrating the learned flow field."""
+        visual_proj = self.project_visual_features(visual_features)
+        base_xy = self._constant_velocity_future(player_bbox)
+        if initial_residual is None:
+            residual_xy = torch.zeros_like(base_xy)
+        else:
+            residual_xy = initial_residual
+        steps = max(1, self.flow_steps)
+        dt = 1.0 / steps
+        for idx in range(steps):
+            t = torch.full(
+                (visual_proj.shape[0],),
+                (idx + 0.5) * dt,
+                dtype=visual_proj.dtype,
+                device=visual_proj.device,
+            )
+            residual_xy = residual_xy + self.flow_head(visual_proj, player_bbox, residual_xy, t) * dt
+        future_xy = base_xy + residual_xy
+        if return_outputs:
+            return {"future_xy": future_xy, "residual_xy": residual_xy, "base_xy": base_xy}
+        return future_xy
+
+    def flow_matching_outputs(
+        self,
+        visual_features: torch.Tensor,
+        player_bbox: torch.Tensor,
+        future_xy: torch.Tensor,
+        noise: torch.Tensor | None = None,
+        t: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Build conditional flow-matching tensors for residual trajectory chunks."""
+        visual_proj = self.project_visual_features(visual_features)
+        base_xy = self._constant_velocity_future(player_bbox)
+        target_residual = future_xy - base_xy
+        if noise is None:
+            noise = torch.randn_like(target_residual)
+        if t is None:
+            t = torch.rand(target_residual.shape[0], dtype=target_residual.dtype, device=target_residual.device)
+        t_view = t.view(target_residual.shape[0], 1, 1)
+        residual_state = (1.0 - t_view) * noise + t_view * target_residual
+        target_velocity = target_residual - noise
+        pred_velocity = self.flow_head(visual_proj, player_bbox, residual_state, t)
+        return {
+            "pred_velocity": pred_velocity,
+            "target_velocity": target_velocity,
+            "residual_state": residual_state,
+            "target_residual": target_residual,
+            "base_xy": base_xy,
+            "t": t,
+            "noise": noise,
+        }
 
     def _constant_velocity_future(self, player_bbox: torch.Tensor) -> torch.Tensor:
         return constant_velocity_future(player_bbox, self.horizon)

@@ -215,6 +215,7 @@ def train(
     value_rank_loss_weight: float = 1.0,
     value_fde_weight: float = 0.5,
     value_target_scale: float = 10.0,
+    flow_steps: int = 8,
     model_name: str = "Qwen/Qwen2-VL-2B-Instruct",
     device: str = "cuda",
     log_every: int = 10,
@@ -326,6 +327,7 @@ def train(
         "value_rank_loss_weight": value_rank_loss_weight,
         "value_fde_weight": value_fde_weight,
         "value_target_scale": value_target_scale,
+        "flow_steps": flow_steps,
         "qwen_lr": QWEN_LR,
         "adam_eps": ADAM_EPS,
         "grad_clip_norm": GRAD_CLIP_NORM,
@@ -344,6 +346,7 @@ def train(
         visual_frames=visual_frames,
         action_stride=action_stride,
         policy_kind=policy_kind,
+        flow_steps=flow_steps,
     )
     model.to(device)
     tracking_model = TrackingChunkBaseline(horizon=horizon)
@@ -442,6 +445,13 @@ def train(
             value_rank_loss = torch.zeros((), dtype=trajectory_loss.dtype, device=device)
             if policy_kind == "chunk":
                 loss = trajectory_loss + endpoint_loss_weight * endpoint_loss
+            elif policy_kind == "flow":
+                flow_outputs = model.flow_matching_outputs(visual_features, bbox, target)
+                policy_loss = trajectory_loss_fn(
+                    flow_outputs["pred_velocity"],
+                    flow_outputs["target_velocity"],
+                )
+                loss = policy_loss + endpoint_loss_weight * endpoint_loss
             else:
                 action_labels = model.action_labels(bbox, target)
                 teacher_action_logits = model.teacher_forced_action_logits(visual_features, bbox, target)
@@ -625,12 +635,14 @@ def train(
             "visual_proj": model.visual_proj.state_dict(),
             "policy_kind": policy_kind,
             "chunk_head": model.chunk_head.state_dict(),
+            "flow_head": model.flow_head.state_dict(),
             "tracking_baseline": tracking_model.state_dict(),
             "step_embedding": model.step_embedding.state_dict(),
             "head": model.head.state_dict(),
             "value_head": model.value_head.state_dict(),
             "action_codebook": model.action_codebook.cpu(),
             "action_stride": model.action_stride,
+            "flow_steps": model.flow_steps,
             "qwen_lr": QWEN_LR,
             "adam_eps": ADAM_EPS,
             "grad_clip_norm": GRAD_CLIP_NORM,
@@ -669,7 +681,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--overfit-samples", type=int, default=0)
     parser.add_argument("--sample-selection", default="first", choices=["first", "max_motion"])
-    parser.add_argument("--policy-kind", default="chunk", choices=["chunk", "codebook"])
+    parser.add_argument("--policy-kind", default="chunk", choices=["chunk", "codebook", "flow"])
     parser.add_argument("--endpoint-loss-weight", type=float, default=ENDPOINT_LOSS_WEIGHT)
     parser.add_argument("--tracking-lr", type=float, default=TRACKING_LR)
     parser.add_argument("--policy-loss-weight", type=float, default=0.05)
@@ -677,6 +689,7 @@ if __name__ == "__main__":
     parser.add_argument("--value-rank-loss-weight", type=float, default=1.0)
     parser.add_argument("--value-fde-weight", type=float, default=0.5)
     parser.add_argument("--value-target-scale", type=float, default=10.0)
+    parser.add_argument("--flow-steps", type=int, default=8)
     parser.add_argument("--mcts-simulations", type=int, default=0)
     parser.add_argument("--mcts-top-k", type=int, default=8)
     parser.add_argument("--mcts-c-puct", type=float, default=1.5)
@@ -713,6 +726,7 @@ if __name__ == "__main__":
         value_rank_loss_weight=args.value_rank_loss_weight,
         value_fde_weight=args.value_fde_weight,
         value_target_scale=args.value_target_scale,
+        flow_steps=args.flow_steps,
         mcts_simulations=args.mcts_simulations,
         mcts_top_k=args.mcts_top_k,
         mcts_c_puct=args.mcts_c_puct,

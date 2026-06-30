@@ -24,6 +24,11 @@ tracking-only chunk expert on the same target. That baseline is the robotics
 action expert with vision removed: if Qwen cannot beat it, the next bottleneck
 is visual/state context, not RL.
 
+An experimental conditional-flow-matching residual policy is available with
+`--policy-kind flow`. It trains a velocity field over noised future residual
+chunks conditioned on Qwen visual features and selected-player tracking history,
+then uses a deterministic ODE rollout for ADE/FDE evaluation.
+
 Run the fixed-seed 10%/2% ACT-head Modal job with:
 
 ```bash
@@ -53,4 +58,10 @@ Run the current one-sample full-Qwen-visual + ACT chunk-head overfit gate on H10
 
 ```bash
 uvx modal run modal_train.py --split train --train-sequence-count 1 --eval-sequence-count 1 --input-frames 25 --visual-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --overfit-samples 1 --sample-selection max_motion --epochs 500 --batch-size 1 --lr 0.003 --tracking-lr 0.001 --endpoint-loss-weight 1.0 --mcts-simulations 0 --seed 7
+```
+
+Run the same one-sample gate with the experimental flow policy using:
+
+```bash
+uvx modal run modal_train.py --split train --train-sequence-count 1 --eval-sequence-count 1 --input-frames 25 --visual-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --overfit-samples 1 --sample-selection max_motion --policy-kind flow --flow-steps 8 --epochs 500 --batch-size 1 --lr 0.003 --tracking-lr 0.001 --endpoint-loss-weight 1.0 --mcts-simulations 0 --seed 7
 ```

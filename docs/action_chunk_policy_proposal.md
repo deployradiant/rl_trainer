@@ -53,13 +53,15 @@ Implement now:
 - Constant-position and constant-velocity baselines.
 - Tracking-only chunk expert trained on the same target as Qwen.
 - ACT-style chunk head.
+- Experimental conditional-flow-matching residual chunk head behind
+  `--policy-kind flow`.
 - Direct PyTorch training loss for full future xy.
 - Metrics in logs, history JSON, rollout JSON, final result dict, and web UI.
 - Validation on one-sample overfit, fixed 5-sequence slice, and 10%/2% split.
 
 Leave out for now:
 
-- Diffusion or flow matching.
+- Production diffusion/flow policies with stochastic best-of-K evaluation.
 - Learned motion-token vocabularies.
 - GRPO or other RL updates.
 - Multi-player context.
