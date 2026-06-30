@@ -54,8 +54,8 @@ Run the full local check suite with:
 pre-commit run --all-files
 ```
 
-The hooks run `ruff check --fix`, `ruff format`, and Vulture's unused-code
-scan before commits.
+The hooks run `ruff check --fix` and `ruff format` before commits. Ruff also
+flags unused imports, unused local variables, and unused unpacked variables.
 
 Run the current one-sample learned-value MCTS overfit gate with:
 

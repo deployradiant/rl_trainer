@@ -9,33 +9,7 @@ extend-exclude = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "I"]
+select = ["E", "F", "I", "RUF059"]
 
 [tool.ruff.format]
 line-ending = "lf"
-
-[tool.vulture]
-paths = ["."]
-exclude = [
-    ".git",
-    ".ruff_cache",
-    ".venv",
-    "artifacts",
-    "data/SoccerNet",
-    "data/sample",
-    "data/sample_clip",
-]
-ignore_decorators = [
-    "@app.function",
-    "@app.local_entrypoint",
-    "@modal.asgi_app",
-    "@server.get",
-]
-ignore_names = [
-    "forward",
-    "forward_outputs",
-    "full_sample",
-    "run_trajectory_mcts",
-]
-min_confidence = 60
-sort_by_size = true

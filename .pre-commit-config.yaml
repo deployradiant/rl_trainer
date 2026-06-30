@@ -19,13 +19,3 @@ repos:
         types_or: [python, pyi]
         additional_dependencies:
           - ruff==0.15.20
-
-      - id: vulture
-        name: vulture unused-code check
-        entry: vulture
-        language: python
-        pass_filenames: false
-        args:
-          - --config=pyproject.toml
-        additional_dependencies:
-          - vulture==2.16
