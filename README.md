@@ -28,7 +28,8 @@ An experimental conditional-flow-matching residual policy is available with
 `--policy-kind flow`. It trains a velocity field over noised future residual
 chunks conditioned on Qwen visual features and selected-player tracking history,
 then uses a deterministic ODE rollout for ADE/FDE evaluation. The default
-source noise scale is `0.05` in normalized coordinate units.
+source noise scale is `0.05` in normalized coordinate units; use
+`--flow-noise-scale 0.0` for deterministic one-sample overfit gates.
 
 Run the fixed-seed 10%/2% ACT-head Modal job with:
 
@@ -64,5 +65,5 @@ uvx modal run modal_train.py --split train --train-sequence-count 1 --eval-seque
 Run the same one-sample gate with the experimental flow policy using:
 
 ```bash
-uvx modal run modal_train.py --split train --train-sequence-count 1 --eval-sequence-count 1 --input-frames 25 --visual-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --overfit-samples 1 --sample-selection max_motion --policy-kind flow --flow-steps 8 --flow-noise-scale 0.05 --epochs 500 --batch-size 1 --lr 0.003 --tracking-lr 0.001 --endpoint-loss-weight 1.0 --mcts-simulations 0 --seed 7
+uvx modal run modal_train.py --split train --train-sequence-count 1 --eval-sequence-count 1 --input-frames 25 --visual-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --overfit-samples 1 --sample-selection max_motion --policy-kind flow --flow-steps 8 --flow-noise-scale 0.0 --epochs 500 --batch-size 1 --lr 0.003 --tracking-lr 0.001 --endpoint-loss-weight 1.0 --mcts-simulations 0 --seed 7
 ```

@@ -454,7 +454,7 @@ def train(
                     flow_outputs["pred_velocity"],
                     flow_outputs["target_velocity"],
                 )
-                loss = policy_loss + endpoint_loss_weight * endpoint_loss
+                loss = policy_loss + trajectory_loss + endpoint_loss_weight * endpoint_loss
             else:
                 action_labels = model.action_labels(bbox, target)
                 teacher_action_logits = model.teacher_forced_action_logits(visual_features, bbox, target)
