@@ -65,5 +65,5 @@ uvx modal run modal_train.py --split train --train-sequence-count 1 --eval-seque
 Run the same one-sample gate with the experimental flow policy using:
 
 ```bash
-uvx modal run modal_train.py --split train --train-sequence-count 1 --eval-sequence-count 1 --input-frames 25 --visual-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --overfit-samples 1 --sample-selection max_motion --policy-kind flow --flow-steps 8 --flow-noise-scale 0.0 --epochs 500 --batch-size 1 --lr 0.003 --tracking-lr 0.001 --endpoint-loss-weight 1.0 --mcts-simulations 0 --seed 7
+uvx modal run modal_train.py --split train --train-sequence-count 1 --eval-sequence-count 5 --input-frames 25 --visual-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --overfit-samples 1 --sample-selection max_motion --extra-rollout-sequence-count 5 --policy-kind flow --flow-steps 8 --flow-noise-scale 0.0 --epochs 500 --batch-size 1 --lr 0.003 --tracking-lr 0.001 --endpoint-loss-weight 1.0 --mcts-simulations 0 --seed 7
 ```

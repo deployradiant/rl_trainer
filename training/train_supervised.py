@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import random
 import time
 from pathlib import Path
 
@@ -27,6 +28,19 @@ TRACKING_LR = 1e-3
 ADAM_EPS = 1e-4
 GRAD_CLIP_NORM = 1.0
 ENDPOINT_LOSS_WEIGHT = 1.0
+
+
+class SampleListDataset(Dataset):
+    """Small in-memory dataset for selected rollout artifact samples."""
+
+    def __init__(self, samples: list[dict]):
+        self.samples = samples
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> dict:
+        return self.samples[idx]
 
 
 def parameter_grad_norm(parameters: list[torch.nn.Parameter]) -> float:
@@ -155,6 +169,33 @@ def select_sample_indices(
     return indices, metadata
 
 
+def choose_extra_rollout_sequences(
+    all_sequences: list[str],
+    train_sequences: list[str],
+    eval_sequences: list[str],
+    count: int,
+    seed: int,
+) -> list[str]:
+    """Pick deterministic rollout-only sequences outside the training set."""
+    if count <= 0:
+        return []
+    chosen = []
+    excluded = set(train_sequences)
+    for sequence in eval_sequences:
+        if sequence not in excluded and sequence not in chosen:
+            chosen.append(sequence)
+            if len(chosen) == count:
+                return chosen
+
+    candidates = [
+        sequence for sequence in all_sequences
+        if sequence not in excluded and sequence not in chosen
+    ]
+    random.Random(seed).shuffle(candidates)
+    chosen.extend(candidates[:max(0, count - len(chosen))])
+    return sorted(chosen)
+
+
 def build_dataset(
     data_root: str,
     split: str,
@@ -207,6 +248,7 @@ def train(
     seed: int = 7,
     overfit_samples: int = 0,
     sample_selection: str = "first",
+    extra_rollout_sequence_count: int = 0,
     policy_kind: str = "chunk",
     endpoint_loss_weight: float = ENDPOINT_LOSS_WEIGHT,
     tracking_lr: float = TRACKING_LR,
@@ -301,6 +343,39 @@ def train(
         )
     print(f"Eval dataset: {len(eval_dataset)} samples")
 
+    extra_rollout_sequences = choose_extra_rollout_sequences(
+        all_sequences=all_sequences,
+        train_sequences=train_sequences,
+        eval_sequences=eval_sequences,
+        count=extra_rollout_sequence_count,
+        seed=seed,
+    )
+    extra_rollout_samples: list[dict] = []
+    for rollout_sequence in extra_rollout_sequences:
+        rollout_dataset = build_dataset(
+            data_root=data_root,
+            split=split,
+            sequences=[rollout_sequence],
+            input_frames=input_frames,
+            visual_frames=visual_frames,
+            horizon=horizon,
+            stride=stride,
+            image_size=image_size,
+            max_frames=max_frames,
+        )
+        rollout_indices, _ = select_sample_indices(
+            rollout_dataset,
+            count=1,
+            selection=sample_selection,
+        )
+        if rollout_indices:
+            extra_rollout_samples.append(rollout_dataset[rollout_indices[0]])
+    if extra_rollout_samples:
+        print(
+            "Extra rollout sequences: "
+            f"{extra_rollout_sequences} ({len(extra_rollout_samples)} sample(s))"
+        )
+
     manifest = {
         "seed": seed,
         "split": split,
@@ -320,6 +395,8 @@ def train(
         "eval_sequence_count": eval_sequence_count,
         "overfit_samples": overfit_samples,
         "sample_selection": sample_selection,
+        "extra_rollout_sequence_count": extra_rollout_sequence_count,
+        "extra_rollout_sequences": extra_rollout_sequences,
         "policy_kind": policy_kind,
         "endpoint_loss_weight": endpoint_loss_weight,
         "tracking_lr": tracking_lr,
@@ -612,9 +689,15 @@ def train(
         f"eval_teacher_act={metric_text(final['eval_teacher_action_accuracy'])} "
         f"eval_value_act={metric_text(final['eval_value_action_accuracy'])}"
     )
+    artifact_dataset = eval_dataset
+    if extra_rollout_samples:
+        artifact_samples = [eval_dataset[idx] for idx in range(len(eval_dataset))]
+        artifact_samples.extend(extra_rollout_samples)
+        artifact_dataset = SampleListDataset(artifact_samples)
+
     save_prediction_artifacts(
         model=model,
-        dataset=eval_dataset,
+        dataset=artifact_dataset,
         device=device,
         preview_path=preview_path,
         rollouts_path=rollouts_path,
@@ -685,6 +768,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--overfit-samples", type=int, default=0)
     parser.add_argument("--sample-selection", default="first", choices=["first", "max_motion"])
+    parser.add_argument("--extra-rollout-sequence-count", type=int, default=0)
     parser.add_argument("--policy-kind", default="chunk", choices=["chunk", "codebook", "flow"])
     parser.add_argument("--endpoint-loss-weight", type=float, default=ENDPOINT_LOSS_WEIGHT)
     parser.add_argument("--tracking-lr", type=float, default=TRACKING_LR)
@@ -723,6 +807,7 @@ if __name__ == "__main__":
         seed=args.seed,
         overfit_samples=args.overfit_samples,
         sample_selection=args.sample_selection,
+        extra_rollout_sequence_count=args.extra_rollout_sequence_count,
         policy_kind=args.policy_kind,
         endpoint_loss_weight=args.endpoint_loss_weight,
         tracking_lr=args.tracking_lr,
