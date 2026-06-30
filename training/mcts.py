@@ -146,12 +146,13 @@ class TrajectoryMCTS:
         current_xy = node.current_xy
         future_points = list(node.future_points)
         frames_this_step = min(self.action_stride, self.horizon - len(future_points))
+        chunk_points = []
         for _ in range(frames_this_step):
             current_xy = current_xy + next_velocity
+            chunk_points.append(current_xy)
             future_points.append(current_xy.squeeze(0))
 
-        next_bbox = torch.cat([current_xy, node.bbox_state[:, -1, 2:]], dim=-1).unsqueeze(1)
-        bbox_state = torch.cat([node.bbox_state[:, 1:], next_bbox], dim=1)
+        bbox_state = self.model._append_xy_history(node.bbox_state, torch.stack(chunk_points, dim=1))
         return SearchNode(
             step=node.step + 1,
             bbox_state=bbox_state,
@@ -182,12 +183,13 @@ class TrajectoryMCTS:
             candidates = self.model._candidate_velocities(velocity)
             next_velocity = candidates[:, action]
             frames_this_step = min(self.action_stride, self.horizon - len(future_points))
+            chunk_points = []
             for _ in range(frames_this_step):
                 current_xy = current_xy + next_velocity
+                chunk_points.append(current_xy)
                 future_points.append(current_xy.squeeze(0))
 
-            next_bbox = torch.cat([current_xy, bbox_state[:, -1, 2:]], dim=-1).unsqueeze(1)
-            bbox_state = torch.cat([bbox_state[:, 1:], next_bbox], dim=1)
+            bbox_state = self.model._append_xy_history(bbox_state, torch.stack(chunk_points, dim=1))
             step += 1
         learned_value = float(np.mean(value_estimates)) if value_estimates else 0.0
         return actions, torch.stack(future_points), learned_value

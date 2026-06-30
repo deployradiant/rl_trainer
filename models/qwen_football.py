@@ -251,6 +251,12 @@ class QwenFootballModel(nn.Module):
     def _constant_velocity_future(self, player_bbox: torch.Tensor) -> torch.Tensor:
         return constant_velocity_future(player_bbox, self.horizon)
 
+    def _append_xy_history(self, bbox_state: torch.Tensor, xy_points: torch.Tensor) -> torch.Tensor:
+        """Append per-frame xy points to bbox history while preserving bbox size."""
+        bbox_size = bbox_state[:, -1:, 2:].expand(-1, xy_points.shape[1], -1)
+        next_bboxes = torch.cat([xy_points, bbox_size], dim=-1)
+        return torch.cat([bbox_state, next_bboxes], dim=1)[:, -bbox_state.shape[1]:]
+
     def predict_codebook_from_visual_features(
         self,
         visual_features: torch.Tensor,
@@ -279,12 +285,13 @@ class QwenFootballModel(nn.Module):
                 next_velocity = (probs.unsqueeze(-1) * candidates).sum(dim=1)
 
             frames_this_step = min(self.action_stride, self.horizon - len(future_points))
+            chunk_points = []
             for _ in range(frames_this_step):
                 current_xy = current_xy + next_velocity
+                chunk_points.append(current_xy)
                 future_points.append(current_xy)
 
-            next_bbox = torch.cat([current_xy, bbox_state[:, -1, 2:]], dim=-1).unsqueeze(1)
-            bbox_state = torch.cat([bbox_state[:, 1:], next_bbox], dim=1)
+            bbox_state = self._append_xy_history(bbox_state, torch.stack(chunk_points, dim=1))
             action_logits.append(logits)
 
         future_xy = torch.stack(future_points, dim=1)
@@ -308,9 +315,8 @@ class QwenFootballModel(nn.Module):
             logits_by_step.append(self._policy_logits(visual_proj, bbox_state, step))
 
             end = min((step + 1) * self.action_stride, self.horizon)
-            target_xy = future_xy[:, end - 1]
-            next_bbox = torch.cat([target_xy, bbox_state[:, -1, 2:]], dim=-1).unsqueeze(1)
-            bbox_state = torch.cat([bbox_state[:, 1:], next_bbox], dim=1)
+            start = step * self.action_stride
+            bbox_state = self._append_xy_history(bbox_state, future_xy[:, start:end])
 
         return torch.stack(logits_by_step, dim=1)
 
@@ -329,9 +335,8 @@ class QwenFootballModel(nn.Module):
             values_by_step.append(self._action_values(visual_proj, bbox_state, step))
 
             end = min((step + 1) * self.action_stride, self.horizon)
-            target_xy = future_xy[:, end - 1]
-            next_bbox = torch.cat([target_xy, bbox_state[:, -1, 2:]], dim=-1).unsqueeze(1)
-            bbox_state = torch.cat([bbox_state[:, 1:], next_bbox], dim=1)
+            start = step * self.action_stride
+            bbox_state = self._append_xy_history(bbox_state, future_xy[:, start:end])
 
         return torch.stack(values_by_step, dim=1)
 
@@ -374,8 +379,7 @@ class QwenFootballModel(nn.Module):
             distances = (candidates - target_velocity.unsqueeze(1)).norm(dim=-1)
             labels.append(distances.argmin(dim=-1))
 
-            next_bbox = torch.cat([target_xy, bbox_state[:, -1, 2:]], dim=-1).unsqueeze(1)
-            bbox_state = torch.cat([bbox_state[:, 1:], next_bbox], dim=1)
+            bbox_state = self._append_xy_history(bbox_state, future_xy[:, previous_end:end])
             current_xy = target_xy
             previous_end = end
 
@@ -411,8 +415,7 @@ class QwenFootballModel(nn.Module):
             step_weight = 1.0 + (terminal_weight if end == self.horizon else 0.0)
             targets.append((best_error - endpoint_error) * step_weight * target_scale)
 
-            next_bbox = torch.cat([target_xy, bbox_state[:, -1, 2:]], dim=-1).unsqueeze(1)
-            bbox_state = torch.cat([bbox_state[:, 1:], next_bbox], dim=1)
+            bbox_state = self._append_xy_history(bbox_state, future_xy[:, previous_end:end])
             current_xy = target_xy
             previous_end = end
 
