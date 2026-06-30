@@ -19,6 +19,7 @@ class FlowMatchingTests(unittest.TestCase):
 
         self.assertEqual(tuple(velocity.shape), (2, 4, 2))
         self.assertTrue(torch.isfinite(velocity).all())
+        self.assertTrue(torch.allclose(velocity, torch.zeros_like(velocity)))
 
     def test_qwen_flow_matching_outputs_build_target_velocity(self):
         model = QwenFootballModel.__new__(QwenFootballModel)
@@ -82,6 +83,10 @@ class FlowMatchingTests(unittest.TestCase):
         self.assertEqual(tuple(outputs["future_xy"].shape), (1, 4, 2))
         self.assertEqual(tuple(outputs["residual_xy"].shape), (1, 4, 2))
         self.assertTrue(torch.isfinite(outputs["future_xy"]).all())
+        self.assertTrue(torch.allclose(
+            outputs["future_xy"],
+            QwenFootballModel._constant_velocity_future(model, bbox),
+        ))
 
 
 if __name__ == "__main__":

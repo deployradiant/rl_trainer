@@ -26,6 +26,9 @@ class FlowMatchingChunkHead(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, 2),
         )
+        final = self.net[-1]
+        nn.init.zeros_(final.weight)
+        nn.init.zeros_(final.bias)
 
     def forward(
         self,
