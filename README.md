@@ -15,12 +15,27 @@ for verifying the local Git workflow before larger training changes.
 Initial real-data run: deterministic SoccerNet `train` split sequence subsets
 with seed `7`, using `10%` of sequences for training and `2%` for held-out eval.
 The run writes `sequence_manifest.json`, `training_history.json`,
-`trajectory_head.pt`, `trajectory_preview.png`, and `trajectory_rollouts.json`.
+`trajectory_preview.png`, and `trajectory_rollouts.json`. Add
+`--save-checkpoint` when you also want the large Qwen visual-stack checkpoint
+copied to the Modal volume as `trajectory_head.pt`.
 
-Run the first 10%/2% Modal job with:
+The current policy is an ACT-style action chunk head. Qwen predicts a bounded
+residual over a constant-velocity future trajectory. Each run also trains a
+tracking-only chunk expert on the same target. That baseline is the robotics
+action expert with vision removed: if Qwen cannot beat it, the next bottleneck
+is visual/state context, not RL.
+
+An experimental conditional-flow-matching residual policy is available with
+`--policy-kind flow`. It trains a velocity field over noised future residual
+chunks conditioned on Qwen visual features and selected-player tracking history,
+then uses a deterministic ODE rollout for ADE/FDE evaluation. The default
+source noise scale is `0.05` in normalized coordinate units; use
+`--flow-noise-scale 0.0` for deterministic one-sample overfit gates.
+
+Run the fixed-seed 10%/2% ACT-head Modal job with:
 
 ```bash
-uvx modal run modal_train.py --split train --train-fraction 0.10 --eval-fraction 0.02 --seed 7 --epochs 1
+uvx modal run modal_train.py --split train --train-fraction 0.10 --eval-fraction 0.02 --input-frames 25 --visual-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --epochs 3 --batch-size 2 --lr 0.001 --tracking-lr 0.001 --endpoint-loss-weight 1.0 --mcts-simulations 0 --seed 7
 ```
 
 Artifacts are copied to the `soccernet-tracking` Modal volume, including
@@ -39,8 +54,17 @@ Deploy the hosted visualizer with:
 uvx modal deploy modal_visualize.py
 ```
 
-Run the current one-sample learned-value MCTS overfit gate with:
+Current hosted visualizer:
+[rl-trainer-visualizer](https://koogle-frick--rl-trainer-visualizer-visualizer.modal.run)
+
+Run the current one-sample full-Qwen-visual + ACT chunk-head overfit gate on H100 with:
 
 ```bash
-uvx modal run modal_train.py --split train --train-sequence-count 1 --eval-sequence-count 1 --input-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --overfit-samples 1 --sample-selection max_motion --epochs 200 --batch-size 1 --lr 0.003 --cache-visual-features --feature-cache-batch-size 1 --policy-loss-weight 1.0 --value-loss-weight 1.0 --value-rank-loss-weight 1.0 --value-fde-weight 0.5 --value-target-scale 10.0 --mcts-simulations 192 --mcts-top-k 10 --mcts-c-puct 1.5 --seed 7
+uvx modal run modal_train.py --split train --train-sequence-count 1 --eval-sequence-count 1 --input-frames 25 --visual-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --overfit-samples 1 --sample-selection max_motion --epochs 500 --batch-size 1 --lr 0.003 --tracking-lr 0.001 --endpoint-loss-weight 1.0 --mcts-simulations 0 --seed 7
+```
+
+Run the same one-sample gate with the experimental flow policy using:
+
+```bash
+uvx modal run modal_train.py --split train --train-sequence-count 1 --eval-sequence-count 5 --input-frames 25 --visual-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --overfit-samples 1 --sample-selection max_motion --extra-rollout-sequence-count 5 --policy-kind flow --flow-steps 8 --flow-noise-scale 0.0 --epochs 500 --batch-size 1 --lr 0.003 --tracking-lr 0.001 --endpoint-loss-weight 1.0 --mcts-simulations 0 --seed 7
 ```

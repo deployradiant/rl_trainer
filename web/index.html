@@ -40,9 +40,30 @@
               </div>
               <div class="flex flex-wrap items-center gap-3 text-xs">
                 <select id="sequence-select" class="h-9 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-white" aria-label="Select rollout sequence"></select>
-                <span class="flex items-center gap-1.5 text-emerald-300"><span class="h-2.5 w-2.5 rounded-full bg-emerald-400"></span>Actual</span>
-                <span class="flex items-center gap-1.5 text-red-300"><span class="h-2.5 w-2.5 rounded-full bg-red-400"></span>Predicted</span>
-                <span class="flex items-center gap-1.5 text-sky-300"><span class="h-2.5 w-2.5 rounded-full bg-sky-400"></span>MCTS</span>
+                <label class="flex items-center gap-1.5 text-emerald-300">
+                  <input id="show-actual" type="checkbox" checked class="h-3.5 w-3.5 accent-emerald-400" />
+                  <span class="h-2.5 w-2.5 rounded-full bg-emerald-400"></span>Actual
+                </label>
+                <label class="flex items-center gap-1.5 text-red-300">
+                  <input id="show-pred" type="checkbox" checked class="h-3.5 w-3.5 accent-red-400" />
+                  <span class="h-2.5 w-2.5 rounded-full bg-red-400"></span>Predicted
+                </label>
+                <label class="flex items-center gap-1.5 text-teal-300">
+                  <input id="show-tracking" type="checkbox" checked class="h-3.5 w-3.5 accent-teal-400" />
+                  <span class="h-2.5 w-2.5 rounded-full bg-teal-400"></span>Tracking
+                </label>
+                <label class="flex items-center gap-1.5 text-yellow-300">
+                  <input id="show-velocity" type="checkbox" checked class="h-3.5 w-3.5 accent-yellow-400" />
+                  <span class="h-2.5 w-2.5 rounded-full bg-yellow-400"></span>Velocity
+                </label>
+                <label class="flex items-center gap-1.5 text-purple-300">
+                  <input id="show-position" type="checkbox" class="h-3.5 w-3.5 accent-purple-400" />
+                  <span class="h-2.5 w-2.5 rounded-full bg-purple-400"></span>Position
+                </label>
+                <label class="flex items-center gap-1.5 text-sky-300">
+                  <input id="show-mcts" type="checkbox" checked class="h-3.5 w-3.5 accent-sky-400" />
+                  <span class="h-2.5 w-2.5 rounded-full bg-sky-400"></span>MCTS
+                </label>
                 <span class="flex items-center gap-1.5 text-white"><span class="h-2.5 w-2.5 rounded-sm bg-white"></span>Box</span>
               </div>
             </div>
@@ -147,6 +168,30 @@
               <div>
                 <dt class="text-zinc-500">Pred move</dt>
                 <dd id="pred-move" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Tracking ADE</dt>
+                <dd id="tracking-ade" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Tracking move</dt>
+                <dd id="tracking-move" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Velocity ADE</dt>
+                <dd id="velocity-ade" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Velocity move</dt>
+                <dd id="velocity-move" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Position ADE</dt>
+                <dd id="position-ade" class="mt-1 font-medium text-white">--</dd>
+              </div>
+              <div>
+                <dt class="text-zinc-500">Position move</dt>
+                <dd id="position-move" class="mt-1 font-medium text-white">--</dd>
               </div>
               <div>
                 <dt class="text-zinc-500">Action stride</dt>
@@ -308,6 +353,11 @@
         ctx.fill();
       }
 
+      function checked(id) {
+        const element = $(id);
+        return !element || element.checked;
+      }
+
       function drawBox(ctx, bbox, imageRect) {
         const cx = imageRect.x + bbox[0] * imageRect.width;
         const cy = imageRect.y + bbox[1] * imageRect.height;
@@ -343,18 +393,42 @@
         }
 
         const actualPoints = rollout.actual_xy.slice(0, frameIndex + 1);
-        drawLine(ctx, actualPoints, imageRect, "#34d399", 4);
-        if (actualPoints.length) drawPoint(ctx, actualPoints[actualPoints.length - 1], imageRect, "#6ee7b7", 5);
+        if (checked("show-actual")) {
+          drawLine(ctx, actualPoints, imageRect, "#34d399", 4);
+          if (actualPoints.length) drawPoint(ctx, actualPoints[actualPoints.length - 1], imageRect, "#6ee7b7", 5);
+        }
 
         if (frameIndex >= rollout.current_index) {
           const predCount = frameIndex - rollout.current_index + 1;
           const predPoints = rollout.pred_xy.slice(0, predCount);
-          drawLine(ctx, predPoints, imageRect, "#fb7185", 4);
-          if (predPoints.length) drawPoint(ctx, predPoints[predPoints.length - 1], imageRect, "#fda4af", 5);
+          if (checked("show-pred")) {
+            drawLine(ctx, predPoints, imageRect, "#fb7185", 4);
+            if (predPoints.length) drawPoint(ctx, predPoints[predPoints.length - 1], imageRect, "#fda4af", 5);
+          }
+
+          const trackingPoints = rollout.tracking_xy?.slice(0, predCount) || [];
+          if (checked("show-tracking")) {
+            drawLine(ctx, trackingPoints, imageRect, "#2dd4bf", 4);
+            if (trackingPoints.length) drawPoint(ctx, trackingPoints[trackingPoints.length - 1], imageRect, "#5eead4", 5);
+          }
+
+          const velocityPoints = rollout.baseline_velocity_xy?.slice(0, predCount) || [];
+          if (checked("show-velocity")) {
+            drawLine(ctx, velocityPoints, imageRect, "#facc15", 3);
+            if (velocityPoints.length) drawPoint(ctx, velocityPoints[velocityPoints.length - 1], imageRect, "#fde047", 4);
+          }
+
+          const positionPoints = rollout.baseline_constant_xy?.slice(0, predCount) || [];
+          if (checked("show-position")) {
+            drawLine(ctx, positionPoints, imageRect, "#c084fc", 3);
+            if (positionPoints.length) drawPoint(ctx, positionPoints[positionPoints.length - 1], imageRect, "#d8b4fe", 4);
+          }
 
           const mctsPoints = rollout.mcts_xy?.slice(0, predCount) || [];
-          drawLine(ctx, mctsPoints, imageRect, "#38bdf8", 4);
-          if (mctsPoints.length) drawPoint(ctx, mctsPoints[mctsPoints.length - 1], imageRect, "#7dd3fc", 5);
+          if (checked("show-mcts")) {
+            drawLine(ctx, mctsPoints, imageRect, "#38bdf8", 4);
+            if (mctsPoints.length) drawPoint(ctx, mctsPoints[mctsPoints.length - 1], imageRect, "#7dd3fc", 5);
+          }
         }
 
         if (frameIndex < rollout.input_bboxes.length) {
@@ -437,6 +511,12 @@
         setText("rollout-ade", number(metrics.ADE));
         setText("actual-move", number(metrics.actual_displacement));
         setText("pred-move", number(metrics.pred_displacement));
+        setText("tracking-ade", number(metrics.tracking_ADE));
+        setText("tracking-move", number(metrics.tracking_displacement));
+        setText("velocity-ade", number(metrics.baseline_velocity_ADE));
+        setText("velocity-move", number(metrics.baseline_velocity_displacement));
+        setText("position-ade", number(metrics.baseline_constant_ADE));
+        setText("position-move", number(metrics.baseline_constant_displacement));
         setText("action-stride", data?.action_stride ?? "--");
         setText("rollout-action", number(metrics.action_accuracy));
         setText("value-action", number(metrics.value_action_accuracy));
@@ -614,6 +694,9 @@
         rolloutVersion = null;
         const candidate = selectedRollout();
         if (candidate) configureRollout(candidate);
+      });
+      ["show-actual", "show-pred", "show-tracking", "show-velocity", "show-position", "show-mcts"].forEach((id) => {
+        $(id).addEventListener("change", drawRolloutFrame);
       });
       window.addEventListener("resize", () => {
         drawRolloutFrame();

@@ -26,7 +26,7 @@ image = (
 
 
 @app.function(
-    gpu="A10G",
+    gpu="H100",
     volumes={"/data": data_vol, "/root/.cache/huggingface": hf_cache},
     image=image,
     timeout=21600,
@@ -34,7 +34,8 @@ image = (
 def run_overfit(
     sequence: str = "",
     split: str = "train",
-    input_frames: int = 5,
+    input_frames: int = 25,
+    visual_frames: int = 5,
     horizon: int = 25,
     action_stride: int = 5,
     stride: int = 50,
@@ -50,16 +51,21 @@ def run_overfit(
     seed: int = 7,
     overfit_samples: int = 0,
     sample_selection: str = "first",
-    cache_visual_features: bool = False,
-    feature_cache_batch_size: int = 4,
+    extra_rollout_sequence_count: int = 0,
+    policy_kind: str = "chunk",
+    endpoint_loss_weight: float = 1.0,
+    tracking_lr: float = 1e-3,
     policy_loss_weight: float = 0.05,
     value_loss_weight: float = 1.0,
     value_rank_loss_weight: float = 1.0,
     value_fde_weight: float = 0.5,
     value_target_scale: float = 10.0,
+    flow_steps: int = 8,
+    flow_noise_scale: float = 0.05,
     mcts_simulations: int = 0,
     mcts_top_k: int = 8,
     mcts_c_puct: float = 1.5,
+    save_checkpoint: bool = False,
 ):
     import os
     import sys
@@ -88,6 +94,7 @@ def run_overfit(
         sequence=sequence,
         split=split,
         input_frames=input_frames,
+        visual_frames=visual_frames,
         horizon=horizon,
         action_stride=action_stride,
         stride=stride,
@@ -103,28 +110,35 @@ def run_overfit(
         seed=seed,
         overfit_samples=overfit_samples,
         sample_selection=sample_selection,
-        cache_visual_features=cache_visual_features,
-        feature_cache_batch_size=feature_cache_batch_size,
+        extra_rollout_sequence_count=extra_rollout_sequence_count,
+        policy_kind=policy_kind,
+        endpoint_loss_weight=endpoint_loss_weight,
+        tracking_lr=tracking_lr,
         policy_loss_weight=policy_loss_weight,
         value_loss_weight=value_loss_weight,
         value_rank_loss_weight=value_rank_loss_weight,
         value_fde_weight=value_fde_weight,
         value_target_scale=value_target_scale,
+        flow_steps=flow_steps,
+        flow_noise_scale=flow_noise_scale,
         mcts_simulations=mcts_simulations,
         mcts_top_k=mcts_top_k,
         mcts_c_puct=mcts_c_puct,
+        save_checkpoint=save_checkpoint,
         device="cuda",
     )
 
     # Save artifacts to volume
     import shutil
-    for fname in [
+    artifact_files = [
         "sequence_manifest.json",
         "training_history.json",
-        "trajectory_head.pt",
         "trajectory_preview.png",
         "trajectory_rollouts.json",
-    ]:
+    ]
+    if save_checkpoint:
+        artifact_files.append("trajectory_head.pt")
+    for fname in artifact_files:
         if os.path.exists(fname):
             shutil.copy(fname, f"/data/{fname}")
     data_vol.commit()
@@ -136,7 +150,8 @@ def run_overfit(
 def main(
     sequence: str = "",
     split: str = "train",
-    input_frames: int = 5,
+    input_frames: int = 25,
+    visual_frames: int = 5,
     horizon: int = 25,
     action_stride: int = 5,
     stride: int = 50,
@@ -152,21 +167,27 @@ def main(
     seed: int = 7,
     overfit_samples: int = 0,
     sample_selection: str = "first",
-    cache_visual_features: bool = False,
-    feature_cache_batch_size: int = 4,
+    extra_rollout_sequence_count: int = 0,
+    policy_kind: str = "chunk",
+    endpoint_loss_weight: float = 1.0,
+    tracking_lr: float = 1e-3,
     policy_loss_weight: float = 0.05,
     value_loss_weight: float = 1.0,
     value_rank_loss_weight: float = 1.0,
     value_fde_weight: float = 0.5,
     value_target_scale: float = 10.0,
+    flow_steps: int = 8,
+    flow_noise_scale: float = 0.05,
     mcts_simulations: int = 0,
     mcts_top_k: int = 8,
     mcts_c_puct: float = 1.5,
+    save_checkpoint: bool = False,
 ):
     results = run_overfit.remote(
         sequence=sequence,
         split=split,
         input_frames=input_frames,
+        visual_frames=visual_frames,
         horizon=horizon,
         action_stride=action_stride,
         stride=stride,
@@ -182,15 +203,20 @@ def main(
         seed=seed,
         overfit_samples=overfit_samples,
         sample_selection=sample_selection,
-        cache_visual_features=cache_visual_features,
-        feature_cache_batch_size=feature_cache_batch_size,
+        extra_rollout_sequence_count=extra_rollout_sequence_count,
+        policy_kind=policy_kind,
+        endpoint_loss_weight=endpoint_loss_weight,
+        tracking_lr=tracking_lr,
         policy_loss_weight=policy_loss_weight,
         value_loss_weight=value_loss_weight,
         value_rank_loss_weight=value_rank_loss_weight,
         value_fde_weight=value_fde_weight,
         value_target_scale=value_target_scale,
+        flow_steps=flow_steps,
+        flow_noise_scale=flow_noise_scale,
         mcts_simulations=mcts_simulations,
         mcts_top_k=mcts_top_k,
         mcts_c_puct=mcts_c_puct,
+        save_checkpoint=save_checkpoint,
     )
     print(f"\nModal training complete: {results}")

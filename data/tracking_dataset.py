@@ -156,8 +156,8 @@ class SoccerNetTrackingDataset(Dataset):
     """Player trajectory prediction dataset from SoccerNet tracking data.
 
     Each sample:
-        frames:       [T, C, H, W]  -- input frame window (float, 0-1)
-        player_bbox:  [T, 4]        -- normalized (cx, cy, w, h) per input frame
+        frames:       [V, C, H, W]  -- most recent visual frame window (float, 0-1)
+        player_bbox:  [T, 4]        -- normalized (cx, cy, w, h) per tracking frame
         future_xy:    [horizon, 2]  -- normalized future centers
 
     Coordinates are normalized to [0, 1] by image dimensions.  This is
@@ -171,6 +171,7 @@ class SoccerNetTrackingDataset(Dataset):
         sequence: str = "SNMOT-116",
         split: str = "test",
         input_frames: int = 5,
+        visual_frames: int | None = None,
         horizon: int = 25,
         stride: int = 50,
         image_size: int = 224,
@@ -181,10 +182,13 @@ class SoccerNetTrackingDataset(Dataset):
         self.sequence = sequence
         self.split = split
         self.input_frames = input_frames
+        self.visual_frames = visual_frames or input_frames
         self.horizon = horizon
         self.stride = stride
         self.image_size = image_size
         self.max_frames = max_frames
+        if self.visual_frames <= 0 or self.visual_frames > self.input_frames:
+            raise ValueError("visual_frames must be between 1 and input_frames")
 
         seq_dir = self.data_root / split / sequence
 
@@ -269,9 +273,10 @@ class SoccerNetTrackingDataset(Dataset):
         track_id, start = self.samples[idx]
         track = self.tracks[track_id]
 
-        # Load input frames
+        # Load the most recent visual frames from the tracking history.
         frames = []
-        for f in range(start, start + self.input_frames):
+        visual_start = start + self.input_frames - self.visual_frames
+        for f in range(visual_start, start + self.input_frames):
             img = self._load_image(f)
             img = img.resize((self.image_size, self.image_size))
             frames.append(np.array(img, dtype=np.float32) / 255.0)
@@ -304,6 +309,7 @@ class SoccerNetTrackingDataset(Dataset):
             "sequence": self.sequence,
             "track_id": track_id,
             "start_frame": start,
+            "visual_frames": self.visual_frames,
         }
 
 
@@ -316,6 +322,7 @@ class MultiSequenceSoccerNetTrackingDataset(Dataset):
         sequences: list[str],
         split: str = "train",
         input_frames: int = 5,
+        visual_frames: int | None = None,
         horizon: int = 25,
         stride: int = 50,
         image_size: int = 224,
@@ -328,6 +335,7 @@ class MultiSequenceSoccerNetTrackingDataset(Dataset):
                 sequence=sequence,
                 split=split,
                 input_frames=input_frames,
+                visual_frames=visual_frames,
                 horizon=horizon,
                 stride=stride,
                 image_size=image_size,

@@ -18,6 +18,10 @@ multi-player forecasting, MCTS, or RL.
 The model should be treated as a vision-language-trajectory system, not as a
 chat model that emits coordinates as text.
 
+See [robotics_vla_research.md](robotics_vla_research.md) for the robotics and
+vision-language-action research lessons that inform the next action-policy
+iterations.
+
 The intended shape is:
 
 ```text
@@ -52,8 +56,8 @@ model size.
 Expected first setup:
 
 ```text
-Qwen VLM backbone, frozen
-small custom football trajectory head
+Qwen VLM backbone with explicit visual-stack fine-tuning on H100
+small custom football trajectory/value heads
 plain PyTorch training loop
 Modal for remote GPU execution
 ```
@@ -163,14 +167,17 @@ metadata
 Create a fixed held-out evaluation split by match, not by random frame, so the
 eval set measures generalization rather than near-duplicate memorization.
 
-### Stage 1: Frozen Backbone Supervised Baseline
+### Stage 1: Qwen Supervised Baseline
 
-Freeze Qwen and train only the football trajectory head.
+Train a supervised Qwen football baseline before adding RL. The current H100
+path fine-tunes Qwen's visual stack plus the football trajectory/value heads.
+Cheap ablations may still freeze Qwen or use adapters, but the default research
+gate should prove gradients flow through Qwen itself.
 
 Goal:
 
 ```text
-prove that the visual backbone plus a small head can learn short-horizon player
+prove that Qwen plus small football heads can learn short-horizon player
 movement better than simple baselines
 ```
 
