@@ -25,7 +25,10 @@
           <h1 class="mt-1 text-2xl font-semibold tracking-normal text-white sm:text-3xl">Football Trajectory Eval</h1>
         </div>
         <div class="flex flex-wrap items-center gap-2 text-sm text-zinc-300">
-          <span id="status" class="rounded-full border border-amber-400/40 bg-amber-400/10 px-3 py-1 text-amber-100">Loading</span>
+          <span id="status" class="inline-flex items-center gap-2 rounded-full border border-amber-400/40 bg-amber-400/10 px-3 py-1 text-amber-100">
+            <span class="h-3 w-3 animate-spin rounded-full border-2 border-current border-r-transparent" aria-hidden="true"></span>
+            Loading
+          </span>
           <span id="updated" class="text-zinc-500"></span>
         </div>
       </header>
@@ -50,7 +53,13 @@
             <div class="p-4">
               <div class="relative overflow-hidden rounded-md bg-black">
                 <canvas id="rollout-canvas" class="aspect-video w-full"></canvas>
-                <div id="rollout-empty" class="absolute inset-0 flex items-center justify-center px-6 text-center text-sm text-zinc-500">No rollout artifact found.</div>
+                <div id="rollout-loading" class="absolute inset-0 flex items-center justify-center bg-black/55 px-6 text-center backdrop-blur-[1px]">
+                  <div class="flex items-center gap-3 rounded-md border border-zinc-700 bg-zinc-950/85 px-4 py-3 text-sm font-medium text-zinc-100 shadow-lg">
+                    <span class="h-4 w-4 animate-spin rounded-full border-2 border-emerald-300 border-r-transparent" aria-hidden="true"></span>
+                    <span id="rollout-loading-text">Loading rollouts</span>
+                  </div>
+                </div>
+                <div id="rollout-empty" class="absolute inset-0 hidden flex items-center justify-center px-6 text-center text-sm text-zinc-500">No rollout artifact found.</div>
               </div>
 
               <div class="mt-4 grid gap-3 md:grid-cols-[auto_auto_minmax(0,1fr)_auto_auto] md:items-center">
@@ -214,6 +223,7 @@
       let playing = false;
       let playTimer = null;
       let rolloutLoadToken = 0;
+      let resultsLoading = false;
 
       function number(value, digits = 4) {
         return Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "--";
@@ -226,6 +236,35 @@
 
       function setText(id, value) {
         $(id).textContent = value ?? "--";
+      }
+
+      function makeSpinner(className) {
+        const spinner = document.createElement("span");
+        spinner.className = className;
+        spinner.setAttribute("aria-hidden", "true");
+        return spinner;
+      }
+
+      function setStatus(label, tone, loading = false) {
+        const styles = {
+          loading: "inline-flex items-center gap-2 rounded-full border border-amber-400/40 bg-amber-400/10 px-3 py-1 text-amber-100",
+          live: "inline-flex items-center gap-2 rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 py-1 text-emerald-100",
+          error: "inline-flex items-center gap-2 rounded-full border border-red-400/40 bg-red-400/10 px-3 py-1 text-red-100",
+        };
+        const status = $("status");
+        status.className = styles[tone] || styles.loading;
+        status.replaceChildren();
+        if (loading) {
+          status.append(makeSpinner("h-3 w-3 animate-spin rounded-full border-2 border-current border-r-transparent"));
+        }
+        status.append(document.createTextNode(label));
+      }
+
+      function setRolloutLoading(loading, message = "Loading frame") {
+        const indicator = $("rollout-loading");
+        $("rollout-loading-text").textContent = message;
+        indicator.classList.toggle("hidden", !loading);
+        indicator.classList.toggle("flex", loading);
       }
 
       function rolloutId(item) {
@@ -452,6 +491,7 @@
         rollout = data;
         frameIndex = 0;
         setPlaying(false);
+        setRolloutLoading(true, "Loading first frame");
         showRolloutMessage("Loading first frame...");
         $("frame-scrubber").max = Math.max(0, rollout.frame_numbers.length - 1);
         $("frame-scrubber").value = 0;
@@ -463,11 +503,15 @@
         try {
           await waitForFrame(firstFrame);
           if (token !== rolloutLoadToken) return;
+          setRolloutLoading(false);
           hideRolloutMessage();
           drawRolloutFrame();
           preloadRemainingFrames(data.updated_at, token);
         } catch (error) {
-          if (token === rolloutLoadToken) showRolloutMessage(error.message);
+          if (token === rolloutLoadToken) {
+            setRolloutLoading(false);
+            showRolloutMessage(error.message);
+          }
         }
       }
 
@@ -534,6 +578,9 @@
       }
 
       async function loadResults() {
+        if (resultsLoading) return;
+        resultsLoading = true;
+        setStatus("Loading", "loading", true);
         try {
           const response = await fetch("/api/results", { cache: "no-store" });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -546,10 +593,7 @@
           syncSequenceSelect();
           const rolloutData = selectedRollout() || {};
 
-          $("status").textContent = rollouts.length ? "Live rollouts" : "Missing rollouts";
-          $("status").className = rollouts.length
-            ? "rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 py-1 text-emerald-100"
-            : "rounded-full border border-red-400/40 bg-red-400/10 px-3 py-1 text-red-100";
+          setStatus(rollouts.length ? "Live rollouts" : "Missing rollouts", rollouts.length ? "live" : "error");
 
           const updatedAt = rolloutsInfo.updated_at || data.preview?.updated_at;
           $("updated").textContent = updatedAt ? new Date(updatedAt * 1000).toLocaleString() : "";
@@ -577,15 +621,18 @@
             }
           } else {
             rollout = null;
+            setRolloutLoading(false);
             showRolloutMessage("No rollout artifact found.");
           }
 
           drawHistory(history);
         } catch (error) {
-          $("status").textContent = "Load failed";
-          $("status").className = "rounded-full border border-red-400/40 bg-red-400/10 px-3 py-1 text-red-100";
+          setStatus("Load failed", "error");
+          setRolloutLoading(false);
           showRolloutMessage(error.message);
           drawHistory([]);
+        } finally {
+          resultsLoading = false;
         }
       }
 
