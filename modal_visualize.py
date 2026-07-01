@@ -22,6 +22,7 @@ image = (
 WEB_ROOT = Path("/root/web")
 ARTIFACT_ROOT = Path(os.environ.get("RL_TRAINER_ARTIFACT_ROOT", "/data"))
 TRACKING_ROOT = ARTIFACT_ROOT / "tracking-2023"
+FRAME_CACHE_HEADERS = {"Cache-Control": "public, max-age=3600"}
 
 
 def _read_json(path: Path, fallback):
@@ -104,7 +105,7 @@ def visualizer():
     def _serve_frame(split: str, sequence: str, frame_number: int):
         extracted = TRACKING_ROOT / split / sequence / "img1" / f"{frame_number:06d}.jpg"
         if extracted.exists():
-            return FileResponse(extracted, media_type="image/jpeg")
+            return FileResponse(extracted, media_type="image/jpeg", headers=FRAME_CACHE_HEADERS)
 
         archive_path = TRACKING_ROOT / f"{split}.zip"
         if not archive_path.exists():
@@ -113,9 +114,13 @@ def visualizer():
         member = f"{split}/{sequence}/img1/{frame_number:06d}.jpg"
         try:
             with zipfile.ZipFile(archive_path) as archive:
-                return Response(archive.read(member), media_type="image/jpeg")
+                return Response(archive.read(member), media_type="image/jpeg", headers=FRAME_CACHE_HEADERS)
         except KeyError:
             return JSONResponse({"error": f"{member} not found"}, status_code=404)
+
+    @server.get("/frames/{split}/{sequence}/{frame_number}.jpg")
+    def split_sequence_frame(split: str, sequence: str, frame_number: int):
+        return _serve_frame(split, sequence, frame_number)
 
     @server.get("/frames/{sequence}/{frame_number}.jpg")
     def sequence_frame(sequence: str, frame_number: int):

@@ -217,13 +217,17 @@
       let rollout = null;
       let rollouts = [];
       let rolloutVersion = null;
+      let rolloutsUpdatedAt = null;
+      let rolloutUpdatedAt = null;
       let selectedRolloutId = null;
       let frameImages = [];
       let frameIndex = 0;
       let playing = false;
       let playTimer = null;
       let rolloutLoadToken = 0;
+      let frameStepPending = false;
       let resultsLoading = false;
+      const framePrefetchLookahead = 8;
 
       function number(value, digits = 4) {
         return Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "--";
@@ -414,36 +418,52 @@
         if (!playing || !rollout) return;
         const speed = Number($("speed").value || 1);
         const fps = Math.max(1, Number(rollout.fps || 25) * speed);
-        playTimer = setInterval(() => {
+        playTimer = setInterval(async () => {
+          if (frameStepPending) return;
           if (frameIndex >= rollout.frame_numbers.length - 1) {
             setPlaying(false);
             return;
           }
-          frameIndex += 1;
-          $("frame-scrubber").value = frameIndex;
-          drawRolloutFrame();
+          frameStepPending = true;
+          try {
+            await showFrame(frameIndex + 1, true);
+          } finally {
+            frameStepPending = false;
+          }
         }, 1000 / fps);
       }
 
-      function frameUrl(frameNumber, updatedAt) {
-        return `/frames/${encodeURIComponent(rollout.sequence)}/${frameNumber}.jpg?v=${updatedAt || Date.now()}`;
+      function frameUrl(frameNumber) {
+        const version = encodeURIComponent(rolloutUpdatedAt || 0);
+        const sequence = encodeURIComponent(rollout.sequence);
+        if (rollout.split) {
+          return `/frames/${encodeURIComponent(rollout.split)}/${sequence}/${frameNumber}.jpg?v=${version}`;
+        }
+        return `/frames/${sequence}/${frameNumber}.jpg?v=${version}`;
       }
 
       function frameIsLoaded(image) {
         return Boolean(image?.complete && image.naturalWidth);
       }
 
-      function createFrameImage(frameNumber, updatedAt, token) {
+      function createFrameImage(index, token) {
+        const frameNumber = rollout.frame_numbers[index];
         const image = document.createElement("img");
         image.decoding = "async";
         image.loading = "eager";
         image.addEventListener("load", () => {
-          if (token === rolloutLoadToken) drawRolloutFrame();
+          if (token !== rolloutLoadToken || index !== frameIndex) return;
+          setRolloutLoading(false);
+          hideRolloutMessage();
+          drawRolloutFrame();
+          prefetchFrameWindow(index, token);
         });
         image.addEventListener("error", () => {
-          if (token === rolloutLoadToken) showRolloutMessage(`Could not load frame ${frameNumber}.`);
+          if (token !== rolloutLoadToken || index !== frameIndex) return;
+          setRolloutLoading(false);
+          showRolloutMessage(`Could not load frame ${frameNumber}.`);
         });
-        image.src = frameUrl(frameNumber, updatedAt);
+        image.src = frameUrl(frameNumber);
         return image;
       }
 
@@ -457,17 +477,51 @@
         }
       }
 
-      function preloadFirstFrame(updatedAt, token) {
-        frameImages = new Array(rollout.frame_numbers.length);
-        frameImages[0] = createFrameImage(rollout.frame_numbers[0], updatedAt, token);
-        return frameImages[0];
+      function ensureFrameImage(index, token) {
+        if (!rollout || index < 0 || index >= rollout.frame_numbers.length) return null;
+        if (!frameImages[index]) frameImages[index] = createFrameImage(index, token);
+        return frameImages[index];
       }
 
-      function preloadRemainingFrames(updatedAt, token) {
-        rollout.frame_numbers.forEach((frameNumber, index) => {
-          if (index === 0 || token !== rolloutLoadToken) return;
-          frameImages[index] = createFrameImage(frameNumber, updatedAt, token);
-        });
+      function prefetchFrameWindow(index, token) {
+        if (!rollout || token !== rolloutLoadToken) return;
+        const end = Math.min(rollout.frame_numbers.length - 1, index + framePrefetchLookahead);
+        for (let nextIndex = index + 1; nextIndex <= end; nextIndex += 1) {
+          ensureFrameImage(nextIndex, token);
+        }
+      }
+
+      async function showFrame(index, waitForImage = false) {
+        if (!rollout?.frame_numbers?.length) return;
+        const token = rolloutLoadToken;
+        const targetIndex = Math.max(0, Math.min(rollout.frame_numbers.length - 1, index));
+        frameIndex = targetIndex;
+        $("frame-scrubber").value = frameIndex;
+        const image = ensureFrameImage(frameIndex, token);
+        drawRolloutFrame();
+        prefetchFrameWindow(frameIndex, token);
+
+        if (frameIsLoaded(image)) {
+          setRolloutLoading(false);
+          hideRolloutMessage();
+          return;
+        }
+
+        setRolloutLoading(true, `Loading frame ${rollout.frame_numbers[frameIndex]}`);
+        if (!waitForImage) return;
+
+        try {
+          await waitForFrame(image);
+          if (token !== rolloutLoadToken || frameIndex !== targetIndex) return;
+          setRolloutLoading(false);
+          hideRolloutMessage();
+          drawRolloutFrame();
+          prefetchFrameWindow(targetIndex, token);
+        } catch (error) {
+          if (token !== rolloutLoadToken || frameIndex !== targetIndex) return;
+          setRolloutLoading(false);
+          showRolloutMessage(error.message);
+        }
       }
 
       function updateRolloutStats(data) {
@@ -489,30 +543,25 @@
       async function configureRollout(data) {
         const token = ++rolloutLoadToken;
         rollout = data;
+        rolloutUpdatedAt = data.updated_at || rolloutsUpdatedAt || null;
+        frameImages = new Array(rollout.frame_numbers?.length || 0);
         frameIndex = 0;
+        frameStepPending = false;
         setPlaying(false);
         setRolloutLoading(true, "Loading first frame");
-        showRolloutMessage("Loading first frame...");
+        hideRolloutMessage();
+        if (!rollout.frame_numbers?.length) {
+          setRolloutLoading(false);
+          showRolloutMessage("No frame numbers found for rollout.");
+          return;
+        }
         $("frame-scrubber").max = Math.max(0, rollout.frame_numbers.length - 1);
         $("frame-scrubber").value = 0;
         const adeLabel = rollout.metrics?.ADE != null ? ` / ADE ${number(rollout.metrics.ADE)}` : "";
         $("rollout-meta").textContent = `${rollout.sequence} / track ${rollout.track_id} / ${rollout.frame_numbers.length} frames${adeLabel}`;
         updateRolloutStats(rollout);
-        const firstFrame = preloadFirstFrame(data.updated_at, token);
-        drawRolloutFrame();
-        try {
-          await waitForFrame(firstFrame);
-          if (token !== rolloutLoadToken) return;
-          setRolloutLoading(false);
-          hideRolloutMessage();
-          drawRolloutFrame();
-          preloadRemainingFrames(data.updated_at, token);
-        } catch (error) {
-          if (token === rolloutLoadToken) {
-            setRolloutLoading(false);
-            showRolloutMessage(error.message);
-          }
-        }
+        await showFrame(0, true);
+        if (token === rolloutLoadToken) prefetchFrameWindow(0, token);
       }
 
       function drawHistory(history) {
@@ -596,6 +645,7 @@
           setStatus(rollouts.length ? "Live rollouts" : "Missing rollouts", rollouts.length ? "live" : "error");
 
           const updatedAt = rolloutsInfo.updated_at || data.preview?.updated_at;
+          rolloutsUpdatedAt = updatedAt || null;
           $("updated").textContent = updatedAt ? new Date(updatedAt * 1000).toLocaleString() : "";
 
           for (const [key, id] of Object.entries(metricIds)) setText(id, number(latest[key]));
@@ -621,6 +671,10 @@
             }
           } else {
             rollout = null;
+            rolloutUpdatedAt = null;
+            frameImages = [];
+            rolloutLoadToken += 1;
+            setPlaying(false);
             setRolloutLoading(false);
             showRolloutMessage("No rollout artifact found.");
           }
@@ -639,19 +693,14 @@
       $("play-toggle").addEventListener("click", () => setPlaying(!playing));
       $("prev-frame").addEventListener("click", () => {
         if (!rollout) return;
-        frameIndex = Math.max(0, frameIndex - 1);
-        $("frame-scrubber").value = frameIndex;
-        drawRolloutFrame();
+        showFrame(frameIndex - 1, true);
       });
       $("next-frame").addEventListener("click", () => {
         if (!rollout) return;
-        frameIndex = Math.min(rollout.frame_numbers.length - 1, frameIndex + 1);
-        $("frame-scrubber").value = frameIndex;
-        drawRolloutFrame();
+        showFrame(frameIndex + 1, true);
       });
       $("frame-scrubber").addEventListener("input", (event) => {
-        frameIndex = Number(event.target.value);
-        drawRolloutFrame();
+        showFrame(Number(event.target.value), true);
       });
       $("speed").addEventListener("change", () => {
         if (playing) setPlaying(true);
@@ -660,7 +709,7 @@
         selectedRolloutId = event.target.value;
         rolloutVersion = null;
         const candidate = selectedRollout();
-        if (candidate) configureRollout(candidate);
+        if (candidate) configureRollout({ ...candidate, updated_at: rolloutsUpdatedAt });
       });
       window.addEventListener("resize", () => {
         drawRolloutFrame();
