@@ -219,8 +219,10 @@
       let rolloutVersion = null;
       let rolloutsUpdatedAt = null;
       let rolloutUpdatedAt = null;
+      let frameUrlTemplate = "/frames/{split}/{sequence}/{frame_number}.jpg";
       let selectedRolloutId = null;
       let frameImages = [];
+      let frameLoadAttempts = [];
       let frameIndex = 0;
       let playing = false;
       let playTimer = null;
@@ -228,6 +230,7 @@
       let frameStepPending = false;
       let resultsLoading = false;
       const framePrefetchLookahead = 8;
+      const maxFrameLoadAttempts = 3;
 
       function number(value, digits = 4) {
         return Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "--";
@@ -433,21 +436,35 @@
         }, 1000 / fps);
       }
 
-      function frameUrl(frameNumber) {
+      function frameUrl(frameNumber, attempt = 0) {
         const version = encodeURIComponent(rolloutUpdatedAt || 0);
+        const params = new URLSearchParams({ v: version });
+        if (attempt) params.set("attempt", String(attempt));
+
         const sequence = encodeURIComponent(rollout.sequence);
-        if (rollout.split) {
-          return `/frames/${encodeURIComponent(rollout.split)}/${sequence}/${frameNumber}.jpg?v=${version}`;
+        const frame = encodeURIComponent(frameNumber);
+        if (!rollout.split && frameUrlTemplate.includes("{split}")) {
+          return `/frames/${sequence}/${frame}.jpg?${params}`;
         }
-        return `/frames/${sequence}/${frameNumber}.jpg?v=${version}`;
+        const split = encodeURIComponent(rollout.split || "");
+        const path = frameUrlTemplate
+          .replace("{split}", split)
+          .replace("{sequence}", sequence)
+          .replace("{frame_number}", frame);
+        return `${path}?${params}`;
       }
 
       function frameIsLoaded(image) {
         return Boolean(image?.complete && image.naturalWidth);
       }
 
+      function frameHasFailed(image) {
+        return Boolean(image?.complete && !image.naturalWidth);
+      }
+
       function createFrameImage(index, token) {
         const frameNumber = rollout.frame_numbers[index];
+        const attempt = frameLoadAttempts[index] || 0;
         const image = document.createElement("img");
         image.decoding = "async";
         image.loading = "eager";
@@ -463,7 +480,7 @@
           setRolloutLoading(false);
           showRolloutMessage(`Could not load frame ${frameNumber}.`);
         });
-        image.src = frameUrl(frameNumber);
+        image.src = frameUrl(frameNumber, attempt);
         return image;
       }
 
@@ -477,8 +494,15 @@
         }
       }
 
-      function ensureFrameImage(index, token) {
+      function ensureFrameImage(index, token, retryFailed = false) {
         if (!rollout || index < 0 || index >= rollout.frame_numbers.length) return null;
+        if (retryFailed && frameHasFailed(frameImages[index])) {
+          const attempts = frameLoadAttempts[index] || 0;
+          if (attempts < maxFrameLoadAttempts) {
+            frameLoadAttempts[index] = attempts + 1;
+            frameImages[index] = null;
+          }
+        }
         if (!frameImages[index]) frameImages[index] = createFrameImage(index, token);
         return frameImages[index];
       }
@@ -497,7 +521,7 @@
         const targetIndex = Math.max(0, Math.min(rollout.frame_numbers.length - 1, index));
         frameIndex = targetIndex;
         $("frame-scrubber").value = frameIndex;
-        const image = ensureFrameImage(frameIndex, token);
+        let image = ensureFrameImage(frameIndex, token, waitForImage);
         drawRolloutFrame();
         prefetchFrameWindow(frameIndex, token);
 
@@ -518,6 +542,11 @@
           drawRolloutFrame();
           prefetchFrameWindow(targetIndex, token);
         } catch (error) {
+          const attemptsBefore = frameLoadAttempts[targetIndex] || 0;
+          image = ensureFrameImage(targetIndex, token, true);
+          if ((frameLoadAttempts[targetIndex] || 0) > attemptsBefore) {
+            return showFrame(targetIndex, true);
+          }
           if (token !== rolloutLoadToken || frameIndex !== targetIndex) return;
           setRolloutLoading(false);
           showRolloutMessage(error.message);
@@ -545,6 +574,7 @@
         rollout = data;
         rolloutUpdatedAt = data.updated_at || rolloutsUpdatedAt || null;
         frameImages = new Array(rollout.frame_numbers?.length || 0);
+        frameLoadAttempts = new Array(rollout.frame_numbers?.length || 0).fill(0);
         frameIndex = 0;
         frameStepPending = false;
         setPlaying(false);
@@ -638,6 +668,7 @@
           const latest = data.latest || {};
           const history = data.history || [];
           const rolloutsInfo = data.rollouts || {};
+          frameUrlTemplate = rolloutsInfo.frame_url || "/frames/{split}/{sequence}/{frame_number}.jpg";
           rollouts = Array.isArray(rolloutsInfo.data) ? rolloutsInfo.data : [];
           syncSequenceSelect();
           const rolloutData = selectedRollout() || {};
@@ -673,6 +704,7 @@
             rollout = null;
             rolloutUpdatedAt = null;
             frameImages = [];
+            frameLoadAttempts = [];
             rolloutLoadToken += 1;
             setPlaying(false);
             setRolloutLoading(false);

@@ -76,7 +76,7 @@ def visualizer():
                     "available": rollouts_path.exists(),
                     "updated_at": rollout_updated_at,
                     "data": rollouts,
-                    "frame_url": "/frames/{sequence}/{frame_number}.jpg",
+                    "frame_url": "/frames/{split}/{sequence}/{frame_number}.jpg",
                 },
                 "preview": {
                     "url": "/artifacts/trajectory_preview.png",
