@@ -25,7 +25,10 @@
           <h1 class="mt-1 text-2xl font-semibold tracking-normal text-white sm:text-3xl">Football Trajectory Eval</h1>
         </div>
         <div class="flex flex-wrap items-center gap-2 text-sm text-zinc-300">
-          <span id="status" class="rounded-full border border-amber-400/40 bg-amber-400/10 px-3 py-1 text-amber-100">Loading</span>
+          <span id="status" class="inline-flex items-center gap-2 rounded-full border border-amber-400/40 bg-amber-400/10 px-3 py-1 text-amber-100">
+            <span class="h-3 w-3 animate-spin rounded-full border-2 border-current border-r-transparent" aria-hidden="true"></span>
+            Loading
+          </span>
           <span id="updated" class="text-zinc-500"></span>
         </div>
       </header>
@@ -50,7 +53,13 @@
             <div class="p-4">
               <div class="relative overflow-hidden rounded-md bg-black">
                 <canvas id="rollout-canvas" class="aspect-video w-full"></canvas>
-                <div id="rollout-empty" class="absolute inset-0 flex items-center justify-center px-6 text-center text-sm text-zinc-500">No rollout artifact found.</div>
+                <div id="rollout-loading" class="absolute inset-0 flex items-center justify-center bg-black/55 px-6 text-center backdrop-blur-[1px]">
+                  <div class="flex items-center gap-3 rounded-md border border-zinc-700 bg-zinc-950/85 px-4 py-3 text-sm font-medium text-zinc-100 shadow-lg">
+                    <span class="h-4 w-4 animate-spin rounded-full border-2 border-emerald-300 border-r-transparent" aria-hidden="true"></span>
+                    <span id="rollout-loading-text">Loading rollouts</span>
+                  </div>
+                </div>
+                <div id="rollout-empty" class="absolute inset-0 hidden flex items-center justify-center px-6 text-center text-sm text-zinc-500">No rollout artifact found.</div>
               </div>
 
               <div class="mt-4 grid gap-3 md:grid-cols-[auto_auto_minmax(0,1fr)_auto_auto] md:items-center">
@@ -208,12 +217,20 @@
       let rollout = null;
       let rollouts = [];
       let rolloutVersion = null;
+      let rolloutsUpdatedAt = null;
+      let rolloutUpdatedAt = null;
+      let frameUrlTemplate = "/frames/{split}/{sequence}/{frame_number}.jpg";
       let selectedRolloutId = null;
       let frameImages = [];
+      let frameLoadAttempts = [];
       let frameIndex = 0;
       let playing = false;
       let playTimer = null;
       let rolloutLoadToken = 0;
+      let frameStepPending = false;
+      let resultsLoading = false;
+      const framePrefetchLookahead = 8;
+      const maxFrameLoadAttempts = 3;
 
       function number(value, digits = 4) {
         return Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "--";
@@ -226,6 +243,35 @@
 
       function setText(id, value) {
         $(id).textContent = value ?? "--";
+      }
+
+      function makeSpinner(className) {
+        const spinner = document.createElement("span");
+        spinner.className = className;
+        spinner.setAttribute("aria-hidden", "true");
+        return spinner;
+      }
+
+      function setStatus(label, tone, loading = false) {
+        const styles = {
+          loading: "inline-flex items-center gap-2 rounded-full border border-amber-400/40 bg-amber-400/10 px-3 py-1 text-amber-100",
+          live: "inline-flex items-center gap-2 rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 py-1 text-emerald-100",
+          error: "inline-flex items-center gap-2 rounded-full border border-red-400/40 bg-red-400/10 px-3 py-1 text-red-100",
+        };
+        const status = $("status");
+        status.className = styles[tone] || styles.loading;
+        status.replaceChildren();
+        if (loading) {
+          status.append(makeSpinner("h-3 w-3 animate-spin rounded-full border-2 border-current border-r-transparent"));
+        }
+        status.append(document.createTextNode(label));
+      }
+
+      function setRolloutLoading(loading, message = "Loading frame") {
+        const indicator = $("rollout-loading");
+        $("rollout-loading-text").textContent = message;
+        indicator.classList.toggle("hidden", !loading);
+        indicator.classList.toggle("flex", loading);
       }
 
       function rolloutId(item) {
@@ -375,36 +421,66 @@
         if (!playing || !rollout) return;
         const speed = Number($("speed").value || 1);
         const fps = Math.max(1, Number(rollout.fps || 25) * speed);
-        playTimer = setInterval(() => {
+        playTimer = setInterval(async () => {
+          if (frameStepPending) return;
           if (frameIndex >= rollout.frame_numbers.length - 1) {
             setPlaying(false);
             return;
           }
-          frameIndex += 1;
-          $("frame-scrubber").value = frameIndex;
-          drawRolloutFrame();
+          frameStepPending = true;
+          try {
+            await showFrame(frameIndex + 1, true);
+          } finally {
+            frameStepPending = false;
+          }
         }, 1000 / fps);
       }
 
-      function frameUrl(frameNumber, updatedAt) {
-        return `/frames/${encodeURIComponent(rollout.sequence)}/${frameNumber}.jpg?v=${updatedAt || Date.now()}`;
+      function frameUrl(frameNumber, attempt = 0) {
+        const version = encodeURIComponent(rolloutUpdatedAt || 0);
+        const params = new URLSearchParams({ v: version });
+        if (attempt) params.set("attempt", String(attempt));
+
+        const sequence = encodeURIComponent(rollout.sequence);
+        const frame = encodeURIComponent(frameNumber);
+        if (!rollout.split && frameUrlTemplate.includes("{split}")) {
+          return `/frames/${sequence}/${frame}.jpg?${params}`;
+        }
+        const split = encodeURIComponent(rollout.split || "");
+        const path = frameUrlTemplate
+          .replace("{split}", split)
+          .replace("{sequence}", sequence)
+          .replace("{frame_number}", frame);
+        return `${path}?${params}`;
       }
 
       function frameIsLoaded(image) {
         return Boolean(image?.complete && image.naturalWidth);
       }
 
-      function createFrameImage(frameNumber, updatedAt, token) {
+      function frameHasFailed(image) {
+        return Boolean(image?.complete && !image.naturalWidth);
+      }
+
+      function createFrameImage(index, token) {
+        const frameNumber = rollout.frame_numbers[index];
+        const attempt = frameLoadAttempts[index] || 0;
         const image = document.createElement("img");
         image.decoding = "async";
         image.loading = "eager";
         image.addEventListener("load", () => {
-          if (token === rolloutLoadToken) drawRolloutFrame();
+          if (token !== rolloutLoadToken || index !== frameIndex) return;
+          setRolloutLoading(false);
+          hideRolloutMessage();
+          drawRolloutFrame();
+          prefetchFrameWindow(index, token);
         });
         image.addEventListener("error", () => {
-          if (token === rolloutLoadToken) showRolloutMessage(`Could not load frame ${frameNumber}.`);
+          if (token !== rolloutLoadToken || index !== frameIndex) return;
+          setRolloutLoading(false);
+          showRolloutMessage(`Could not load frame ${frameNumber}.`);
         });
-        image.src = frameUrl(frameNumber, updatedAt);
+        image.src = frameUrl(frameNumber, attempt);
         return image;
       }
 
@@ -418,17 +494,63 @@
         }
       }
 
-      function preloadFirstFrame(updatedAt, token) {
-        frameImages = new Array(rollout.frame_numbers.length);
-        frameImages[0] = createFrameImage(rollout.frame_numbers[0], updatedAt, token);
-        return frameImages[0];
+      function ensureFrameImage(index, token, retryFailed = false) {
+        if (!rollout || index < 0 || index >= rollout.frame_numbers.length) return null;
+        if (retryFailed && frameHasFailed(frameImages[index])) {
+          const attempts = frameLoadAttempts[index] || 0;
+          if (attempts < maxFrameLoadAttempts) {
+            frameLoadAttempts[index] = attempts + 1;
+            frameImages[index] = null;
+          }
+        }
+        if (!frameImages[index]) frameImages[index] = createFrameImage(index, token);
+        return frameImages[index];
       }
 
-      function preloadRemainingFrames(updatedAt, token) {
-        rollout.frame_numbers.forEach((frameNumber, index) => {
-          if (index === 0 || token !== rolloutLoadToken) return;
-          frameImages[index] = createFrameImage(frameNumber, updatedAt, token);
-        });
+      function prefetchFrameWindow(index, token) {
+        if (!rollout || token !== rolloutLoadToken) return;
+        const end = Math.min(rollout.frame_numbers.length - 1, index + framePrefetchLookahead);
+        for (let nextIndex = index + 1; nextIndex <= end; nextIndex += 1) {
+          ensureFrameImage(nextIndex, token);
+        }
+      }
+
+      async function showFrame(index, waitForImage = false) {
+        if (!rollout?.frame_numbers?.length) return;
+        const token = rolloutLoadToken;
+        const targetIndex = Math.max(0, Math.min(rollout.frame_numbers.length - 1, index));
+        frameIndex = targetIndex;
+        $("frame-scrubber").value = frameIndex;
+        let image = ensureFrameImage(frameIndex, token, waitForImage);
+        drawRolloutFrame();
+        prefetchFrameWindow(frameIndex, token);
+
+        if (frameIsLoaded(image)) {
+          setRolloutLoading(false);
+          hideRolloutMessage();
+          return;
+        }
+
+        setRolloutLoading(true, `Loading frame ${rollout.frame_numbers[frameIndex]}`);
+        if (!waitForImage) return;
+
+        try {
+          await waitForFrame(image);
+          if (token !== rolloutLoadToken || frameIndex !== targetIndex) return;
+          setRolloutLoading(false);
+          hideRolloutMessage();
+          drawRolloutFrame();
+          prefetchFrameWindow(targetIndex, token);
+        } catch (error) {
+          const attemptsBefore = frameLoadAttempts[targetIndex] || 0;
+          image = ensureFrameImage(targetIndex, token, true);
+          if ((frameLoadAttempts[targetIndex] || 0) > attemptsBefore) {
+            return showFrame(targetIndex, true);
+          }
+          if (token !== rolloutLoadToken || frameIndex !== targetIndex) return;
+          setRolloutLoading(false);
+          showRolloutMessage(error.message);
+        }
       }
 
       function updateRolloutStats(data) {
@@ -450,25 +572,26 @@
       async function configureRollout(data) {
         const token = ++rolloutLoadToken;
         rollout = data;
+        rolloutUpdatedAt = data.updated_at || rolloutsUpdatedAt || null;
+        frameImages = new Array(rollout.frame_numbers?.length || 0);
+        frameLoadAttempts = new Array(rollout.frame_numbers?.length || 0).fill(0);
         frameIndex = 0;
+        frameStepPending = false;
         setPlaying(false);
-        showRolloutMessage("Loading first frame...");
+        setRolloutLoading(true, "Loading first frame");
+        hideRolloutMessage();
+        if (!rollout.frame_numbers?.length) {
+          setRolloutLoading(false);
+          showRolloutMessage("No frame numbers found for rollout.");
+          return;
+        }
         $("frame-scrubber").max = Math.max(0, rollout.frame_numbers.length - 1);
         $("frame-scrubber").value = 0;
         const adeLabel = rollout.metrics?.ADE != null ? ` / ADE ${number(rollout.metrics.ADE)}` : "";
         $("rollout-meta").textContent = `${rollout.sequence} / track ${rollout.track_id} / ${rollout.frame_numbers.length} frames${adeLabel}`;
         updateRolloutStats(rollout);
-        const firstFrame = preloadFirstFrame(data.updated_at, token);
-        drawRolloutFrame();
-        try {
-          await waitForFrame(firstFrame);
-          if (token !== rolloutLoadToken) return;
-          hideRolloutMessage();
-          drawRolloutFrame();
-          preloadRemainingFrames(data.updated_at, token);
-        } catch (error) {
-          if (token === rolloutLoadToken) showRolloutMessage(error.message);
-        }
+        await showFrame(0, true);
+        if (token === rolloutLoadToken) prefetchFrameWindow(0, token);
       }
 
       function drawHistory(history) {
@@ -534,6 +657,9 @@
       }
 
       async function loadResults() {
+        if (resultsLoading) return;
+        resultsLoading = true;
+        setStatus("Loading", "loading", true);
         try {
           const response = await fetch("/api/results", { cache: "no-store" });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -542,16 +668,15 @@
           const latest = data.latest || {};
           const history = data.history || [];
           const rolloutsInfo = data.rollouts || {};
+          frameUrlTemplate = rolloutsInfo.frame_url || "/frames/{split}/{sequence}/{frame_number}.jpg";
           rollouts = Array.isArray(rolloutsInfo.data) ? rolloutsInfo.data : [];
           syncSequenceSelect();
           const rolloutData = selectedRollout() || {};
 
-          $("status").textContent = rollouts.length ? "Live rollouts" : "Missing rollouts";
-          $("status").className = rollouts.length
-            ? "rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 py-1 text-emerald-100"
-            : "rounded-full border border-red-400/40 bg-red-400/10 px-3 py-1 text-red-100";
+          setStatus(rollouts.length ? "Live rollouts" : "Missing rollouts", rollouts.length ? "live" : "error");
 
           const updatedAt = rolloutsInfo.updated_at || data.preview?.updated_at;
+          rolloutsUpdatedAt = updatedAt || null;
           $("updated").textContent = updatedAt ? new Date(updatedAt * 1000).toLocaleString() : "";
 
           for (const [key, id] of Object.entries(metricIds)) setText(id, number(latest[key]));
@@ -577,34 +702,37 @@
             }
           } else {
             rollout = null;
+            rolloutUpdatedAt = null;
+            frameImages = [];
+            frameLoadAttempts = [];
+            rolloutLoadToken += 1;
+            setPlaying(false);
+            setRolloutLoading(false);
             showRolloutMessage("No rollout artifact found.");
           }
 
           drawHistory(history);
         } catch (error) {
-          $("status").textContent = "Load failed";
-          $("status").className = "rounded-full border border-red-400/40 bg-red-400/10 px-3 py-1 text-red-100";
+          setStatus("Load failed", "error");
+          setRolloutLoading(false);
           showRolloutMessage(error.message);
           drawHistory([]);
+        } finally {
+          resultsLoading = false;
         }
       }
 
       $("play-toggle").addEventListener("click", () => setPlaying(!playing));
       $("prev-frame").addEventListener("click", () => {
         if (!rollout) return;
-        frameIndex = Math.max(0, frameIndex - 1);
-        $("frame-scrubber").value = frameIndex;
-        drawRolloutFrame();
+        showFrame(frameIndex - 1, true);
       });
       $("next-frame").addEventListener("click", () => {
         if (!rollout) return;
-        frameIndex = Math.min(rollout.frame_numbers.length - 1, frameIndex + 1);
-        $("frame-scrubber").value = frameIndex;
-        drawRolloutFrame();
+        showFrame(frameIndex + 1, true);
       });
       $("frame-scrubber").addEventListener("input", (event) => {
-        frameIndex = Number(event.target.value);
-        drawRolloutFrame();
+        showFrame(Number(event.target.value), true);
       });
       $("speed").addEventListener("change", () => {
         if (playing) setPlaying(true);
@@ -613,7 +741,7 @@
         selectedRolloutId = event.target.value;
         rolloutVersion = null;
         const candidate = selectedRollout();
-        if (candidate) configureRollout(candidate);
+        if (candidate) configureRollout({ ...candidate, updated_at: rolloutsUpdatedAt });
       });
       window.addEventListener("resize", () => {
         drawRolloutFrame();
