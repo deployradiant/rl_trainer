@@ -45,9 +45,12 @@ Done and verified:
 
 Not built yet, and load-bearing for what follows:
 
-- **No tests and no CI.** The artifact contracts and model gates need fast
-  CPU-only tests: codebook labeling, dataset windowing, match-state
-  validation, MCTS mechanics, artifact schemas.
+- **No tests, no CI, and no repeatable end-to-end training gate.** The README
+  overfit command is the closest thing to a pipeline check, but it is not
+  scripted, not schema-validated, and not run as a matter of course. The
+  verification strategy is real runs first: a scripted end-to-end training job
+  on real SoccerNet data is the primary gate; synthetic fixtures are for small
+  plumbing checks only.
 - **No motion baselines.** The M2 gate "beats constant velocity" cannot be
   evaluated today because constant position/velocity/Kalman baselines do not
   exist anywhere in the repo.
@@ -121,28 +124,48 @@ Output:
 
 Eight steps, in order. Each lists scope, artifacts, and its gate. The
 visualizer grows with every step — each step ships its visual surface together
-with the model or tool, not later.
+with the model or tool, not later. The Step 1 end-to-end training gate is
+rerun for every later step and grows with each step's new artifacts: a
+training change is not done until the real run completes and its artifacts
+validate.
 
-### Step 1: Foundation — tests, CI, artifact contracts
+### Step 1: Foundation — end-to-end training gate, plumbing tests, artifact contracts
+
+The primary check is a real training run on real data, not mocks or synthetic
+fixtures. Synthetic inputs are allowed only for small plumbing checks where a
+real run would prove nothing extra.
 
 Scope:
 
-- pytest with tiny synthetic fixtures (no SoccerNet download, no GPU):
-  match-state validation, Monte Carlo determinism for seed 7, dataset
-  windowing against a fabricated MOT sequence, codebook labeling round-trip
-  (`action_labels` of a codebook-generated future recovers the actions), MCTS
-  end-to-end on a random-weight model.
-- GitHub Actions running ruff + pytest on push.
-- `docs/artifacts.md` (or JSON Schema files) versioning every artifact:
-  `match_state.json`, `simulation_summary.json`, `rollout_samples.json`,
-  `search_diagnostics.json`, `trajectory_rollouts.json`, plus the report
-  artifacts introduced by later steps. Contract tests validate emitted
-  artifacts against the schemas; every artifact gains a `schema_version`.
+- **End-to-end training gate.** Script the existing overfit-style command into
+  a single entrypoint (`scripts/e2e_train.sh` or a make target): a Modal
+  full-GPU job on the real SoccerNet volume with a tiny deterministic slice
+  (`--train-sequence-count 1 --eval-sequence-count 1`, few epochs, seed 7)
+  that runs the whole pipeline — download/cache, dataset, frozen Qwen
+  features, training, eval, MCTS, artifact writing — and then validates every
+  emitted artifact (`sequence_manifest.json`, `training_history.json`,
+  `trajectory_head.pt`, `trajectory_preview.png`, `trajectory_rollouts.json`)
+  against the schemas. Run it before merging any training change. A second
+  scripted invocation covers the Level 0 simulator artifact set (CPU, runs
+  anywhere).
+- **Plumbing tests only where synthetic inputs are the right tool:**
+  match-state validation, Monte Carlo determinism for seed 7, codebook
+  labeling round-trip (`action_labels` of a codebook-generated future
+  recovers the actions), dataset windowing. No mocked training loops.
+- GitHub Actions running ruff + the plumbing tests on push. The e2e training
+  gate runs on Modal — manually at first, wired into CI via a Modal token if
+  that proves worth it.
+- `docs/artifacts.md` (or JSON Schema files) versioning every artifact,
+  including the report artifacts introduced by later steps. Every artifact
+  gains a `schema_version`; the e2e gate is what enforces the schemas.
 
-Artifacts: `tests/`, green CI run, schema doc + contract tests.
+Artifacts: `scripts/e2e_train.sh`, `tests/` (plumbing only), green CI run,
+schema doc, one archived e2e artifact set on the Modal volume as the
+reference run.
 
-Gate: suite runs under ~2 minutes on CPU; the existing Level 0 run and the
-existing trajectory run both validate against the schemas.
+Gate: the end-to-end training job completes on real SoccerNet data and every
+emitted artifact validates against its schema; plumbing tests run in seconds
+on CPU.
 
 ### Step 2: Live World Cup path — M0 fit, snapshot capture, audit
 
