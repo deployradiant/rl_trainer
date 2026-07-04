@@ -11,9 +11,8 @@ This starts with one player.
 See [docs/training_plan.md](docs/training_plan.md) for the current working plan
 and minimal initial training goal. See
 [docs/football_rl_implementation_plan.md](docs/football_rl_implementation_plan.md)
-for the broader implementation roadmap toward current World Cup match simulation,
-from SoccerNet validation through trajectory/value learning, MCTS, RL-style
-post-training, demo, paper, and blog.
+for the training-focused plan toward current World Cup match simulation: outcome,
+event, trajectory, value, MCTS, and RL-style post-training.
 Small documentation-only commits are useful for verifying the local Git workflow
 before larger training changes.
 
