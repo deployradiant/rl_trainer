@@ -158,7 +158,9 @@ Scope:
   - policy details: action labels, action logits, top-k probabilities, entropy,
     teacher-forced vs rollout action choices;
   - value details: imitation-value outputs, selected-action values, loss terms;
-  - activation stats: mean/std/min/max and saturation counts for trainable heads;
+  - activation stats: mean/std/min/max and saturation counts for the pooled
+    Qwen visual features (the head input — catches stale/corrupt feature cache
+    entries and fp16 saturation) and for each trainable head;
   - gradient stats: per-head grad norms, zero-gradient warnings, NaN/Inf checks,
     exploding-gradient warnings.
 - **Quality Modal e2e gate.** Script the existing overfit-style command into a
@@ -169,9 +171,10 @@ Scope:
   frozen Qwen features, training, eval, MCTS, artifact writing — and then
   validates every emitted artifact (`sequence_manifest.json`,
   `training_history.json`, `trajectory_head.pt`, `trajectory_preview.png`,
-  `trajectory_rollouts.json`, `debug_trace.json`) against schemas. Run this
-  before merging substantive training changes; the fast debug gate runs more
-  often.
+  `trajectory_rollouts.json`, `debug_trace.json`) against schemas. The e2e run
+  emits the same `debug_trace.json` for its first eval sample so the trace
+  schema is exercised by both gates. Run this before merging substantive
+  training changes; the fast debug gate runs more often.
 - **Motion baselines in the first loop.** Add constant-position and
   constant-velocity baselines immediately, written into `training_history.json`,
   `trajectory_rollouts.json`, and `debug_trace.json`. The visualizer shows these
@@ -276,9 +279,9 @@ shows finite activations and gradients for the Step 1 reference sample.
 
 Scope:
 
-- Batch visual feature extraction without the per-image PIL round-trip;
-  persistent feature cache on the Modal volume keyed by (sequence, frame,
-  image_size, model name).
+- Batch visual feature extraction without the per-image PIL round-trip,
+  populating the persistent feature cache from the Step 1 Modal cache contract
+  (same key, no second cache format) at full-split scale.
 - Scale training 10% -> 25% -> 100% of train sequences on a full GPU, holding
   the seeded eval split fixed. Begin the data scaling curve from
   docs/training_plan.md (nested subsets, multiple seeds at small sizes).
