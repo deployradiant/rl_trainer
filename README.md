@@ -9,8 +9,13 @@ The moves are then overlayed onto the result of the game.
 This starts with one player.
 
 See [docs/training_plan.md](docs/training_plan.md) for the current working plan
-and minimal initial training goal. Small documentation-only commits are useful
-for verifying the local Git workflow before larger training changes.
+and minimal initial training goal. See
+[docs/football_rl_implementation_plan.md](docs/football_rl_implementation_plan.md)
+for the broader implementation roadmap toward current World Cup match simulation,
+from SoccerNet validation through trajectory/value learning, MCTS, RL-style
+post-training, demo, paper, and blog.
+Small documentation-only commits are useful for verifying the local Git workflow
+before larger training changes.
 
 Initial real-data run: deterministic SoccerNet `train` split sequence subsets
 with seed `7`, using `10%` of sequences for training and `2%` for held-out eval.
@@ -38,6 +43,21 @@ Deploy the hosted visualizer with:
 ```bash
 uvx modal deploy modal_visualize.py
 ```
+
+Run the first Level 0 World Cup-style outcome simulator from a saved match
+snapshot with:
+
+```bash
+python3 -m simulation.run_match \
+  --snapshot-file examples/world_cup_snapshot.example.json \
+  --out artifacts/world_cup/example \
+  --rollouts 10000 \
+  --horizon-minutes 30 \
+  --seed 7
+```
+
+This writes `match_state.json`, `simulation_summary.json`,
+`rollout_samples.json`, `search_diagnostics.json`, and `prediction_card.md`.
 
 ## Developer checks
 
