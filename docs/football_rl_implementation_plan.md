@@ -17,6 +17,47 @@ The first PR already starts the executable path with `data/match_state.py`,
 That Level 0 simulator is intentionally simple; it exists to establish the
 artifact contract and Monte Carlo loop before the learned models arrive.
 
+## Development Approach
+
+Do not waterfall this. Keep a full end-to-end loop working on tiny data at every
+step:
+
+```text
+small fixed data slice
+  -> model forward pass
+  -> loss and backward pass
+  -> rollout / simulation artifact
+  -> visualizer
+  -> activation, logit, value, and gradient diagnostics
+  -> one concrete fix
+```
+
+The core engineering object is the debug loop, not a large training run. A useful
+debug run should finish quickly, be deterministic, and show exactly where the
+model is failing.
+
+Small data ladder:
+
+1. One SoccerNet sample, one selected player, one future horizon.
+2. Ten SoccerNet clips with two held out for eval.
+3. One event sequence.
+4. One hand-authored World Cup match snapshot.
+5. One combined snapshot with event state plus a tracked player.
+
+Every stage should write the same family of artifacts:
+
+- `training_history.json`: losses, metrics, and baseline comparisons.
+- `trajectory_rollouts.json`: actual, baseline, learned, sampled, and MCTS paths.
+- `simulation_summary.json`: match/event rollout distributions.
+- `debug_trace.json`: activations, logits, values, gradient norms, loss terms, and
+  batch metadata.
+- `failure_gallery.json`: worst examples with tags and links to traces.
+
+The visualizer should grow into a debugging surface, not just a demo. It should
+show rollouts and also answer: did the model see the player, did the policy choose
+the right action bucket, did value agree with the outcome, and did gradients reach
+the trainable heads?
+
 ## End State
 
 Input:
@@ -46,6 +87,8 @@ Output:
   next goal, next shot, xG, and top branches.
 - `rollout_samples.json`: representative simulated futures.
 - `search_diagnostics.json`: MCTS branch priors, visits, values, and selected path.
+- `debug_trace.json`: activation statistics, action logits, value estimates,
+  gradient norms, and loss components for the small-data loop.
 - `prediction_card.md`: timestamped prediction plus limitations.
 - Post-match audit comparing predicted distributions to the observed future.
 
@@ -59,7 +102,9 @@ Output:
 | M3 | Tactical value model | Events, trajectories, future outcomes | Chance/possession value |
 | M4 | Post-trained policy | Candidate rollouts scored by M3/MCTS | Better action priors |
 
-Train these in order. MCTS is useful only after M2 and M3 are credible.
+Build thin versions of these in one end-to-end path first, then improve each
+piece. MCTS is useful only after M2 and M3 are credible, but a stub MCTS/debug
+artifact is still useful early because it exercises the integration path.
 
 ## M0: Score And Outcome Model
 
@@ -191,6 +236,15 @@ Gate:
 - Held-out moving-player samples beat constant velocity.
 - Results are reported by motion bucket, not only aggregate average.
 
+Debug trace:
+
+- Visual feature norms per input frame.
+- Selected-player box and crop used by the model.
+- Action logits and action-label bucket per rollout step.
+- Predicted xy, target xy, and baseline xy at each horizon.
+- Per-head gradient norms for projection, policy, value, and residual heads.
+- Activation mean/std/max for trainable heads.
+
 ## M3: Tactical Value Model
 
 Purpose:
@@ -236,6 +290,14 @@ Gate:
 - Does not collapse to "run toward goal" for every state.
 - Calibrated enough that MCTS does not exploit obvious reward bugs.
 
+Debug trace:
+
+- Candidate action or trajectory being scored.
+- Value components: shot, goal, possession, turnover, realism.
+- Calibration bucket and observed outcome.
+- Gradient norms for each value head.
+- Top false positives and false negatives for manual review.
+
 ## M4: MCTS And RL-Style Post-Training
 
 Purpose:
@@ -271,6 +333,7 @@ Metrics:
 - Realism violation rate.
 - Search latency.
 - Reward exploit rate from manual review.
+- Gradient and activation health during post-training.
 
 Gate:
 
@@ -326,23 +389,32 @@ World Cup snapshots:
 - Broadcast overlay: actual, baseline, learned, and MCTS trajectory.
 - Pitch minimap for player movement and value.
 - MCTS root branch table with priors, visits, values, and selected action.
+- Activation panels: feature norms, head activation histograms, and saturation.
+- Gradient panels: per-head gradient norms, zero-gradient warnings, and exploding
+  gradient warnings.
+- Logit/value panels: action distribution, target action bucket, value components,
+  and policy/value disagreement.
 - Failure gallery: identity switches, bad calibration, reward exploits, and
   unrealistic movement.
 
 ## Next PRs
 
-1. Backtest M0 on historical snapshots and fit hazard parameters.
-2. Add SoccerNet validation CLI and baseline trajectory metrics.
-3. Add constant velocity/capped acceleration/retrieval baselines to training
-   artifacts.
-4. Train M1 event transition model with calibration reports.
-5. Train M3 value model from event outcomes and trajectory rollouts.
-6. Extend MCTS artifacts with branch diagnostics and realism penalties.
-7. Add M4 post-training objective with supervised/KL regularization.
-8. Wire M0/M1/M2/M3/M4 into `simulation.run_match` behind capability flags.
+1. Add a tiny end-to-end debug loop for one SoccerNet sample:
+   forward, loss, backward, rollout artifact, `debug_trace.json`, and visualizer
+   panel.
+2. Add activation/logit/gradient capture helpers for trainable heads.
+3. Add baseline trajectory metrics into the same debug artifact.
+4. Add SoccerNet validation CLI only where it blocks the debug loop.
+5. Backtest M0 on historical snapshots and fit hazard parameters.
+6. Train M1 event transition model with calibration reports.
+7. Train M3 value model from event outcomes and trajectory rollouts.
+8. Extend MCTS artifacts with branch diagnostics and realism penalties.
+9. Add M4 post-training objective with supervised/KL regularization.
+10. Wire M0/M1/M2/M3/M4 into `simulation.run_match` behind capability flags.
 
 ## Do Not Do Yet
 
+- Do not build isolated model components that cannot run in the tiny debug loop.
 - Do not tune the Qwen backbone before the frozen-feature baseline beats motion
   baselines.
 - Do not claim optimal strategy from imitation alone.
