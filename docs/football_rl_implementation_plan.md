@@ -196,13 +196,15 @@ Artifacts: visualizer panels, each landing with its upstream WP.
 Gate: every shipped model layer has at least one visual surface.
 Depends on: the corresponding upstream WPs; each panel is independent.
 
-### Workstream A: Outcome And Event Simulation (CPU, event data)
+### Workstream A: Outcome And Event Simulation (CPU, SoccerNet event labels)
 
 **WP-A1 — M0 backtest and hazard fitting.**
-Scope: assemble a historical dataset of international match results (see Data
-Sources); derive team strengths from Elo-style ratings; fit scoring hazards
-conditioned on score state, time, red cards, and knockout context; backtest
-from minute 0, halftime, and minute 75 snapshots.
+Scope: extract goal times, cards, and final scores from the SoccerNet
+action-spotting labels (same downloader and Modal volume as the tracking
+data); fit scoring hazards conditioned on score state, time, and red cards;
+backtest from minute 0, halftime, and minute 75 snapshots of held-out
+SoccerNet games. Team strength stays a snapshot *input* (a small manual
+ratings table for World Cup sides), not a quantity fitted here.
 Artifacts: `training/fit_outcome.py`, fitted parameters in a checked-in config,
 `backtest_report.json`, calibration plots surfaced in the visualizer or a
 static report page.
@@ -220,14 +222,17 @@ Gate: next-goal calibration checked in the A1 backtest harness.
 Depends on: A1.
 
 **WP-A3 — M1 event transition model v0.**
-Scope: per the M1 spec below, trained on StatsBomb open World Cup event data.
-Start with a small MLP/sequence model over recent events; keep it separate
-from Qwen so it stays debuggable. Wire into rollouts as possession-chain
-simulation between goals.
+Scope: per the M1 spec below, trained on SoccerNet action-spotting event
+sequences (goals, shots, cards, substitutions, and the other labeled classes
+with timestamps). Start with a small MLP/sequence model over recent events;
+keep it separate from Qwen so it stays debuggable. Wire into rollouts as
+event-chain simulation between goals.
 Artifacts: `training/train_events.py`, `event_model_report.json` with
 calibration by game state and time bucket, event rollout tree JSON + viz panel.
-Gate: beats team-rate and zone-rate baselines for next shot, next goal, and
-possession continuation.
+Gate: beats team-rate and time-bucket baselines for next event type, next
+shot, and next goal. Zone and possession targets activate only once event
+labels are joined with tracking data — they are not in the action-spotting
+labels.
 Depends on: A1 (shares the backtest harness); parallel to all of B.
 
 ### Workstream B: Trajectory And World Model (GPU/Modal, SoccerNet)
@@ -287,8 +292,9 @@ Depends on: E1, D1. Small; do early.
 **WP-C2 — Tactical value v0 from event data.**
 Scope: per the M3 spec below, structured-input model (no VLM features) trained
 on event sequences: P(shot within T), P(goal within T), xT-style possession
-value delta, turnover risk. This runs on StatsBomb data and is parallel to all
-of B.
+value delta, turnover risk. P(shot) and P(goal) targets come straight from the
+SoccerNet event labels; possession-value and turnover targets activate once
+events are joined with the tracking clips. Parallel to all of B.
 Artifacts: `training/train_value.py`, `value_model_report.json` with
 calibration by score state/zone/time, pitch value heatmap panel (D5).
 Gate: beats location-only and team-rate heuristics; does not collapse to "run
@@ -336,17 +342,20 @@ The per-model specs below are the reference for the WPs above.
 
 ### M1: Event Transition Model
 
-- Data: historical event logs (time, team, player, type, location, possession,
-  shot/xG, cards, subs, score). Current World Cup feeds are inference
-  snapshots only, never training data for pre-registered predictions.
-- Inputs: clock, score, strengths, cards, subs, possession team, field zone,
-  previous N events, player role, pressure proxy when available.
-- Targets: next event type, time-to-event, location/zone, shot and goal
-  probability, possession continuation vs. turnover.
+- Data: SoccerNet action-spotting event sequences (event type + timestamp per
+  event, with team side and score derivable from the label stream). Location,
+  possession, and xG fields are extensions that require joining events with
+  tracking or adding a richer event corpus later. Current World Cup feeds are
+  inference snapshots only, never training data for pre-registered
+  predictions.
+- Inputs: clock, score, strengths, cards, subs, previous N events; possession
+  team, field zone, player role, and pressure proxy once available.
+- Targets: next event type, time-to-event, shot and goal probability;
+  location/zone and possession continuation once available.
 - Model: small tabular/MLP or sequence transformer; separate from Qwen.
 - Loss/metrics: CE for type; NLL/pinball for time; BCE/Brier for shot/goal;
   calibration by game state and time bucket.
-- Gate: beats team-rate and zone-rate baselines.
+- Gate: beats team-rate and time-bucket baselines.
 
 ### M2: Trajectory And World Model
 
@@ -399,20 +408,29 @@ The per-model specs below are the reference for the WPs above.
 
 ## Data Sources
 
-Name the first dataset per track so work can start without a research detour:
+All training runs on SoccerNet, which is already wired into this repository:
+the `soccernet-tracking` Modal volume, downloaded via `SoccerNetDownloader` in
+`modal_train.py`. Tracks that need data SoccerNet's tracking task does not
+carry pull it from other SoccerNet tasks through the same downloader onto the
+same volume — no new external corpus is a prerequisite for any WP.
 
-- **M0:** open historical international results (e.g. the public
-  international-football-results CSV datasets) for outcomes; Elo-style
-  international ratings for team strength priors. Verify license before
-  committing derived artifacts.
-- **M1/M3:** StatsBomb Open Data — full event data for the 2018 and 2022 World
-  Cups (plus other competitions), free for non-commercial use with
-  attribution. This is the default M1 training corpus; expand to licensed data
-  only if the open corpus proves too small.
-- **M2:** SoccerNet tracking-2023 (already wired via Modal volume).
+- **M2:** SoccerNet tracking-2023 (already on the volume; the current training
+  loop uses it).
+- **M1/M3:** SoccerNet action-spotting labels — goals, shots, cards,
+  substitutions, and the other labeled event classes with timestamps across
+  hundreds of broadcast games. Default corpus for the event and value models.
+- **M0:** goal timestamps, card events, and final scores derived from the same
+  action-spotting labels give scoring hazards and outcome labels directly.
 - **World Cup 2026 snapshots:** manual entry via WP-D2 first; automated feed
   adapters only if time permits. Snapshots are inference inputs and audit
-  ground truth, never training data before the audit closes.
+  ground truth, never training data before the audit closes. The one thing
+  SoccerNet cannot provide is strength priors for international sides — keep
+  that as a small manual ratings table inside the snapshot (`TeamState.
+  strength` already exists), not a training dependency.
+
+External corpora (e.g. StatsBomb Open Data with full event locations) are an
+optional later extension if the SoccerNet event labels prove too coarse — not
+a prerequisite.
 
 ## Data Validation That Matters
 
