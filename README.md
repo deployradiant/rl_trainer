@@ -11,8 +11,8 @@ This starts with one player.
 See [docs/training_plan.md](docs/training_plan.md) for the current working plan
 and minimal initial training goal. See
 [docs/football_rl_implementation_plan.md](docs/football_rl_implementation_plan.md)
-for the training-focused plan toward current World Cup match simulation: outcome,
-event, trajectory, value, MCTS, and RL-style post-training.
+for the tracking-first plan centered on SoccerNet player movement, Modal debug
+runs, baselines, visual diagnostics, MCTS, and RL-style post-training.
 Small documentation-only commits are useful for verifying the local Git workflow
 before larger training changes.
 
@@ -42,21 +42,6 @@ Deploy the hosted visualizer with:
 ```bash
 uvx modal deploy modal_visualize.py
 ```
-
-Run the first Level 0 World Cup-style outcome simulator from a saved match
-snapshot with:
-
-```bash
-python3 -m simulation.run_match \
-  --snapshot-file examples/world_cup_snapshot.example.json \
-  --out artifacts/world_cup/example \
-  --rollouts 10000 \
-  --horizon-minutes 30 \
-  --seed 7
-```
-
-This writes `match_state.json`, `simulation_summary.json`,
-`rollout_samples.json`, `search_diagnostics.json`, and `prediction_card.md`.
 
 ## Developer checks
 
