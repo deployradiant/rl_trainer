@@ -9,8 +9,12 @@ The moves are then overlayed onto the result of the game.
 This starts with one player.
 
 See [docs/training_plan.md](docs/training_plan.md) for the current working plan
-and minimal initial training goal. Small documentation-only commits are useful
-for verifying the local Git workflow before larger training changes.
+and minimal initial training goal. See
+[docs/football_rl_implementation_plan.md](docs/football_rl_implementation_plan.md)
+for the tracking-first plan centered on SoccerNet player movement, Modal debug
+runs, baselines, visual diagnostics, MCTS, and RL-style post-training.
+Small documentation-only commits are useful for verifying the local Git workflow
+before larger training changes.
 
 Initial real-data run: deterministic SoccerNet `train` split sequence subsets
 with seed `7`, using `10%` of sequences for training and `2%` for held-out eval.

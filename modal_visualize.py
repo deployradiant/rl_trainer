@@ -114,7 +114,9 @@ def visualizer():
         member = f"{split}/{sequence}/img1/{frame_number:06d}.jpg"
         try:
             with zipfile.ZipFile(archive_path) as archive:
-                return Response(archive.read(member), media_type="image/jpeg", headers=FRAME_CACHE_HEADERS)
+                return Response(
+                    archive.read(member), media_type="image/jpeg", headers=FRAME_CACHE_HEADERS
+                )
         except KeyError:
             return JSONResponse({"error": f"{member} not found"}, status_code=404)
 
