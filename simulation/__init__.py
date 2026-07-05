@@ -1,1 +1,0 @@
-"""Football match simulation helpers."""

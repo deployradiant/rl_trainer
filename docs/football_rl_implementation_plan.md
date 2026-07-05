@@ -1,144 +1,85 @@
-# Football Training And Simulation Plan
+# Football Player Tracking Training Plan
 
-The goal is to simulate a current World Cup match from a saved match state, run
-many futures, and show where the game is likely to go. SoccerNet is the training
-ground for player movement. World Cup match snapshots are the inference target.
+The first objective is player tracking and short-horizon player movement
+prediction on SoccerNet Tracking. Match state, team state, scoreline simulation,
+and World Cup outcome modeling are later layers. They should not be in the
+current build until the tracking loop is reliable and inspectable.
 
-The work stays centered on what we train:
+## Current Scope
 
-1. A score/outcome simulator (M0).
-2. A football event model (M1).
-3. A player trajectory/world model (M2).
-4. A tactical value model (M3).
-5. A post-trained policy searched with MCTS (M4).
+Train and debug the existing Qwen football trajectory stack:
 
-The plan is a single ordered build. Every step ends in a versioned artifact
-that can be tested, inspected, and shown in the visualizer or a report — no
-waterfall, no grand integration step at the end. Each step makes the demo
-strictly better than the one before it.
+```text
+SoccerNet frames + selected player box/history
+        -> frozen Qwen2-VL visual features
+        -> trainable football heads
+        -> action logits, value estimates, future xy rollout
+        -> visualizer + debug trace
+```
 
-Execution model: all training and debug runs are Modal GPU jobs following the
-`modal_train.py` pattern, on a full GPU. There is no separate CPU training
-track and no effort spent optimizing around compute constraints. Local
-execution is for tests and the Level 0 simulator only. Large downloads and
-derived features live on Modal volumes: SoccerNet data, Hugging Face weights,
-Qwen visual-feature caches, run artifacts, and debug traces should be reused
-across runs instead of redownloaded or recomputed.
+Primary task:
+
+> Given a short frame window and one selected player, predict the next 1-2
+> seconds of that player's movement, compare against simple motion baselines,
+> and make failures visible.
+
+Non-goals for this phase:
+
+- No match-state schema.
+- No team-state schema.
+- No scoreline or outcome simulator.
+- No event model.
+- No tactical value model beyond the existing imitation/search-guidance head.
+- No World Cup prediction workflow.
+
+## Execution Model
+
+Use Modal by default.
+
+- Training and debug runs are Modal GPU jobs following the `modal_train.py`
+  pattern.
+- SoccerNet downloads live on the `soccernet-tracking` Modal volume.
+- Qwen/Hugging Face weights live on the `hf-cache` Modal volume.
+- Qwen visual-feature caches should live on the Modal volume and be keyed by:
+  `(source, split, sequence, frame_range, image_size, model_name, processor_version)`.
+- Run artifacts should be keyed by `(git_sha, command, seed, schema_version)`.
+- Local execution is for ruff, small plumbing tests, and reading artifacts.
+
+The point is not to optimize around limited local compute. The point is to make
+small real SoccerNet Modal runs fast through caching and deterministic enough to
+use as the main development loop.
 
 ## Where The Repo Is Today
 
-Done and verified:
+Already present:
 
-- **Level 0 outcome simulator (M0 v0, heuristic).** `data/match_state.py`
-  defines the snapshot schema; `simulation/monte_carlo.py` runs a seeded
-  Poisson-style scoreline Monte Carlo; `simulation/run_match.py` writes the
-  full artifact set (`match_state.json`, `simulation_summary.json`,
-  `rollout_samples.json`, `search_diagnostics.json` stub, `prediction_card.md`).
-- **M2 v0 trajectory stack.** Frozen Qwen2-VL-2B visual features + a
-  relative-motion action codebook (9 headings x 5 speed multipliers = 45
-  actions), a step-aware rollout policy head, and teacher-forced training in
-  `models/qwen_football.py` / `training/train_supervised.py`. Deterministic
-  10%/2% SoccerNet sequence splits with seed 7.
-- **Learned-value MCTS v0.** `training/mcts.py` runs PUCT over the codebook
-  using policy logits as priors and a learned per-action value head. The
-  one-sample learned-value MCTS overfit gate is green (see README command).
-- **Visualizer.** Modal-served web app (`modal_visualize.py`, `web/index.html`)
-  with sequence selection, frame-by-frame playback, and actual/predicted/MCTS
-  trace overlays driven by `trajectory_rollouts.json`.
+- `data/tracking_dataset.py`: SoccerNet Tracking loader for frame windows,
+  selected-player boxes, and future xy targets.
+- `models/qwen_football.py`: frozen Qwen2-VL feature extraction, relative-motion
+  action codebook, policy head, and learned per-action value head.
+- `training/train_supervised.py`: supervised loop, feature caching option,
+  teacher-forced action labels, MCTS option, and artifact writing.
+- `training/mcts.py`: PUCT search over the discrete relative-motion codebook.
+- `training/artifacts.py`: rollout JSON and preview image generation.
+- `modal_train.py`: Modal training entrypoint with SoccerNet and HF cache volumes.
+- `modal_visualize.py` and `web/index.html`: frame playback and actual/pred/MCTS
+  trajectory overlays.
 
-Not built yet, and load-bearing for what follows:
+Missing and load-bearing:
 
-- **No tests, no CI, and no repeatable end-to-end training gate.** The README
-  overfit command is the closest thing to a pipeline check, but it is not
-  scripted, not schema-validated, and not run as a matter of course. The
-  verification strategy is real runs first: a scripted end-to-end training job
-  on real SoccerNet data is the primary gate; synthetic fixtures are for small
-  plumbing checks only.
-- **No motion baselines or model x-ray traces.** The M2 gate "beats constant
-  velocity" cannot be evaluated today because constant position/velocity/Kalman
-  baselines do not exist anywhere in the repo. The current artifacts also do
-  not show activations, logits, value components, loss terms, or gradient norms,
-  so failures are harder to localize than they should be.
-- **No event data ingestion and no M1.** M0 hazard rates are hard-coded
-  heuristics with no backtest against historical matches.
-- **No tactical value.** The existing value head learns *imitation advantage*
-  (how much worse each codebook action is than the best action, measured
-  against the ground-truth future). That is a search-guidance signal, not a
-  tactical judgment. M3 is entirely open.
-- **Integration gaps.** `run_match` only knows M0; `search_diagnostics.json`
-  is a stub; no next-goal/next-shot outputs; no snapshot capture or post-match
-  audit tooling; trajectory coordinates are image-normalized (camera motion is
-  confounded with player motion) with no pitch calibration.
+- No scripted Modal debug gate.
+- No `debug_trace.json`.
+- No activation/logit/value/gradient diagnostics.
+- No constant-position or constant-velocity baseline in the first loop.
+- No schema validation for artifacts.
+- No CI.
+- No tracking data validation report.
+- Current coordinates are image-normalized; camera motion is still confounded
+  with player motion.
 
-Known small fixes folded into the steps below rather than fixed ad hoc: M0
-ignores `stoppage_minute`; horizon-truncated runs report "state at horizon" as
-if it were the final result; per-sample PIL round-trips make feature
-extraction slow at scale.
+## Step 1: Modal One-Player Debug Loop
 
-## Calendar Constraint
-
-The 2026 World Cup final is July 19, 2026. Live, pre-registered predictions —
-snapshot saved before the simulated window, audited after — are only possible
-until then. That is why the M0 fit and snapshot tooling come immediately after
-the foundation step. After July 19 the World Cup surface becomes replay-based
-backtesting, which is still fully useful for calibration claims.
-
-## End State
-
-Input:
-
-- Current match snapshot: score, clock, teams, lineups, cards, substitutions,
-  possession/event state, and optional tracking/video-derived player positions.
-- Model checkpoints for outcome, event, trajectory, value, and policy heads.
-- Rollout count, horizon, and seed.
-
-Command shape:
-
-```bash
-python3 -m simulation.run_match \
-  --snapshot-file snapshots/MATCH_ID/SNAPSHOT_EPOCH.json \
-  --models m0,m1 \
-  --rollouts 10000 \
-  --horizon-minutes 30 \
-  --seed 7 \
-  --out artifacts/world_cup/MATCH_ID/SNAPSHOT_EPOCH
-```
-
-Output:
-
-- `match_state.json`: exactly what was known at simulation time.
-- `simulation_summary.json`: scoreline and win/draw/loss or advance
-  probabilities always; next goal, next shot, and xG when M1 is enabled.
-- `rollout_samples.json`: representative simulated futures.
-- `search_diagnostics.json`: MCTS branch priors, visits, values, and selected
-  path when search is enabled; explicit `not_available` otherwise.
-- `prediction_card.md`: timestamped prediction plus limitations.
-- Post-match audit comparing predicted distributions to the observed future.
-
-## Training Stack
-
-| Layer | What We Train | Main Data | Output | Status |
-| --- | --- | --- | --- | --- |
-| M0 | Score/outcome model | SoccerNet goal/card labels + results | Future scoreline probabilities | v0 heuristic shipped; unfitted, unbacktested |
-| M1 | Event transition model | SoccerNet action-spotting labels | Next event, time, shot, goal | not started |
-| M2 | Trajectory/world model | SoccerNet tracking frames and boxes | Player movement chunks | v0 shipped; overfit gate green; no baselines/debug trace yet |
-| M3 | Tactical value model | SoccerNet events + trajectories | Chance/possession value | not started (imitation-advantage head exists, is not this) |
-| M4 | Post-trained policy | Candidate rollouts scored by M3/MCTS | Better action priors | MCTS v0 shipped; post-training loop not started |
-
-## Build Order
-
-Eight steps, in order. Each lists scope, artifacts, and its gate. The
-visualizer grows with every step — each step ships its visual surface together
-with the model or tool, not later. The Step 1 Modal debug gate is rerun for
-every later training change, and the quality e2e gate grows with each step's
-new artifacts: a training change is not done until the real SoccerNet run
-completes and its artifacts validate.
-
-### Step 1: Foundation — Modal debug loop, baselines, artifact contracts
-
-The primary check is a real training run on real data, not mocks or synthetic
-fixtures. Synthetic inputs are allowed only for small plumbing checks where a
-real run would prove nothing extra.
+This is the first real implementation target.
 
 Scope:
 
@@ -184,13 +125,10 @@ Scope:
   feature-cache path keyed by `(source, split, sequence, frame_range, image_size,
   model_name, processor_version)`, and run artifact directories keyed by
   `(git_sha, command, seed, schema_version)`.
-- **Level 0 simulator smoke.** A second scripted invocation covers the Level 0
-  simulator artifact set (CPU, runs anywhere) so match-state JSON and Monte
-  Carlo determinism stay covered.
 - **Plumbing tests only where synthetic inputs are the right tool:**
-  match-state validation, Monte Carlo determinism for seed 7, codebook
-  labeling round-trip (`action_labels` of a codebook-generated future
-  recovers the actions), dataset windowing. No mocked training loops.
+  codebook labeling round-trip (`action_labels` of a codebook-generated future
+  recovers the actions), deterministic sample selection, baseline generation,
+  artifact schema validation, and dataset windowing. No mocked training loops.
 - GitHub Actions running ruff + the plumbing tests on push. The e2e training
   gate runs on Modal — manually at first, wired into CI via a Modal token if
   that proves worth it.
@@ -198,341 +136,243 @@ Scope:
   including the report artifacts introduced by later steps. Every artifact
   gains a `schema_version`; the e2e gate is what enforces the schemas.
 
-Artifacts: `scripts/debug_one_sample.sh`, `scripts/e2e_train.sh`, `debug_trace.json`,
-baseline fields in `training_history.json` and `trajectory_rollouts.json`,
-visualizer debug panels, `tests/` (plumbing only), green CI run, schema doc,
-one archived debug artifact set and one archived e2e artifact set on the Modal
-volume as reference runs.
+Required artifacts:
 
-Gate: the fast Modal debug job completes on real SoccerNet data; loss is finite;
-one short training loop reduces the supervised loss on the selected sample;
-trainable heads have nonzero finite gradients; constant-position and
-constant-velocity baselines are present; all artifacts validate against schema.
-The quality Modal e2e job completes before merging substantive training changes.
-Plumbing tests run in seconds on CPU.
+- `sequence_manifest.json`
+- `training_history.json`
+- `trajectory_head.pt`
+- `trajectory_preview.png`
+- `trajectory_rollouts.json`
+- `debug_trace.json`
 
-### Step 2: Live World Cup path — M0 fit, snapshot capture, audit
+`debug_trace.json` must include:
 
-The calendar-critical step. Small, and everything after it benefits from the
-prediction/audit loop existing.
+- sample metadata: split, sequence, track id, frame range, horizon, seed;
+- cache metadata: model name, processor version, feature-cache key;
+- selected-player input boxes and target xy;
+- baseline xy paths: constant position and constant velocity;
+- learned xy paths: teacher-forced, greedy rollout, MCTS if enabled;
+- action labels, action logits, top-k probabilities, entropy;
+- imitation/search value outputs and selected-action values;
+- loss terms by head;
+- activation mean/std/min/max for pooled Qwen visual features and trainable heads;
+- per-head gradient norms;
+- zero-gradient warnings;
+- NaN/Inf checks;
+- speed/acceleration sanity checks in current coordinate space.
 
-Scope:
+Gate:
 
-- Extract goal times, cards, and final scores from the SoccerNet
-  action-spotting labels (same downloader and Modal volume as the tracking
-  data). Fit scoring hazards conditioned on score state, time, and red cards.
-  Team strength stays a snapshot *input* (a small manual ratings table for
-  World Cup sides; `TeamState.strength` already exists), not a fitted
-  quantity.
-- Backtest from minute 0, halftime, and minute 75 snapshots of held-out
-  SoccerNet games.
-- Make hazards time-varying inside the rollout so the simulator emits
-  next-goal time distributions; add fan-chart data to
-  `simulation_summary.json`.
-- Fix the known M0 issues here: honor `stoppage_minute`; label
-  horizon-truncated output as `state_at_horizon` rather than a final result.
-- Snapshot capture CLI (manual entry first) writing a valid `MatchState` with
-  `snapshot_epoch_utc`, plus an append-only `predictions_ledger.jsonl`
-  recording (snapshot path, artifact dir, git SHA, seed) at prediction time.
-- Post-match audit CLI: predicted probability of what happened, Brier
-  contribution, rank of observed scoreline, appended to a cumulative
-  `calibration_ledger.json`.
+- Modal job completes on real SoccerNet data.
+- Artifacts exist and validate against schemas.
+- Loss is finite.
+- One short overfit loop reduces supervised loss on the selected sample.
+- Trainable heads have nonzero finite gradients.
+- Constant-position and constant-velocity baselines are present in both JSON and
+  visual output.
+- The visualizer can show the debug sample without manual artifact editing.
 
-Artifacts: `training/fit_outcome.py`, fitted parameters in a checked-in
-config, `backtest_report.json`, `simulation/capture_snapshot.py`,
-`simulation/audit.py`, ledger files, at least one real World Cup snapshot
-committed under `snapshots/`. Visual: match outcome panel (scoreline
-histogram, win/draw/loss bar) and next-goal fan chart.
-
-Gate: fitted M0 beats the current hard-coded heuristic and a static pre-match
-team-strength baseline on NLL and Brier across all three snapshot times;
-deterministic for seed 7; a real knockout-match snapshot captured, simulated,
-and audited before/after the simulated window.
-
-### Step 3: Make M2 falsifiable at eval scale — validation, stronger baselines, naming
+## Step 2: Artifact Schemas And Visual Debug Panels
 
 Scope:
 
-- Extend the Step 1 baselines across the full deterministic eval pass and add
-  capped acceleration plus Kalman-style extrapolation. Written into
-  `training_history.json` and `trajectory_rollouts.json`; ADE/FDE at
-  0.4s/1.0s/2.0s reported by motion bucket
-  (stationary/walking/sprinting/turning), not just aggregate.
-- Tracking data validation CLI (`python -m data.validate_tracking`):
-  train/eval sequence overlap check, future-frame leakage check, track
-  continuity through input+target windows, bbox bounds/size sanity,
-  motion-bucket histogram. Violations listed, not silently dropped.
-- Rename the existing value head to `imitation_value` in code and artifacts so
-  it can never be confused with the tactical value model (M3). Zero behavior
-  change.
+- Add artifact schemas or `docs/artifacts.md`.
+- Add schema version to all training artifacts.
+- Add visualizer panels for:
+  - actual vs baseline vs learned vs MCTS trajectories;
+  - action logits and target action bucket;
+  - value outputs;
+  - loss terms;
+  - activation histograms or summary stats;
+  - gradient norms and warnings.
+- Add plumbing tests for:
+  - action-codebook label round trip;
+  - artifact schema validation;
+  - deterministic sample selection;
+  - baseline path generation.
 
-Artifacts: `training/baselines.py`, extended eval report,
-`data_validation_report.json`, rename PR + schema bump. Visual: baseline
-trace overlaid next to actual/pred/MCTS in the existing player view, reusing
-the Step 1 debug panels at eval scale.
+Gate:
 
-Gate: held-out moving-player samples must beat constant velocity before any
-backbone tuning. The 10%/2% split passes validation, and the debug trace still
-shows finite activations and gradients for the Step 1 reference sample.
+- `uvx pre-commit run --all-files` passes.
+- Debug artifacts from Step 1 pass schema validation.
+- Visualizer displays the one-sample debug trace.
 
-### Step 4: Scale M2 on Modal — throughput, full split, probabilistic futures
+## Step 3: Tracking Baselines And Data Validation
+
+Scope:
+
+- Extend the Step 1 baselines to eval runs:
+  - constant position;
+  - constant velocity;
+  - capped acceleration;
+  - Kalman-style extrapolation if it remains simple.
+- Add `python -m data.validate_tracking`.
+- Validation report includes:
+  - train/eval sequence overlap;
+  - future-frame leakage checks;
+  - track continuity through input and target windows;
+  - bbox bounds and size sanity;
+  - motion buckets: stationary, walking, sprinting, turning;
+  - sample counts by sequence and track id.
+- Write baseline metrics into `training_history.json` and
+  `trajectory_rollouts.json`.
+
+Metrics:
+
+- ADE/FDE at 0.4s, 1.0s, and 2.0s where horizon supports it.
+- Aggregate ADE/FDE.
+- Moving-player ADE/FDE.
+- Motion-bucket ADE/FDE.
+- Action accuracy and top-k action accuracy.
+- Speed/acceleration violation rate in image-normalized space.
+
+Gate:
+
+- The deterministic 10%/2% SoccerNet split passes validation.
+- Learned model beats constant velocity on held-out moving-player samples before
+  any backbone tuning.
+- Failure cases are visible in the visualizer.
+
+## Step 4: Modal Feature Cache And Throughput
 
 Scope:
 
 - Batch visual feature extraction without the per-image PIL round-trip,
   populating the persistent feature cache from the Step 1 Modal cache contract
   (same key, no second cache format) at full-split scale.
+- Add cache hit/miss counts and feature extraction throughput to run artifacts.
 - Scale training 10% -> 25% -> 100% of train sequences on a full GPU, holding
   the seeded eval split fixed. Begin the data scaling curve from
   docs/training_plan.md (nested subsets, multiple seeds at small sizes).
 - Then K-sample futures (mixture head or sampled decoding over the codebook)
   with minADE@K/minFDE@K and NLL/CRPS.
 
-Artifacts: cache module, `scaling_report.json`, eval-metric-vs-data curve,
-extended rollout schema. Visual: sample fan rendering in the player view.
+Artifacts:
 
-Gate: eval ADE/FDE improves with data and beats the Step 3 baselines at 100%
-of the current split; minADE@K beats the deterministic head; samples respect
-speed caps; throughput numbers recorded.
+- `feature_cache_manifest.json`
+- `scaling_report.json`
+- throughput fields in `training_history.json`
 
-### Step 5: M1 event model, wired into the simulator
+Gate:
+
+- Feature cache is reused across Modal runs.
+- Eval ADE/FDE improves or fails explainably as data scales.
+- Throughput numbers are recorded for every scaling run.
+
+## Step 5: Better Trajectory Modeling
 
 Scope:
 
-- Train the event transition model (spec below) on SoccerNet action-spotting
-  event sequences as a Modal GPU job. Small MLP/sequence model over recent
-  events; separate from Qwen so it stays debuggable.
-- Wire into rollouts as event-chain simulation between goals.
-- Give `run_match` capability flags: `--models m0[,m1,...]` with graceful
-  degradation; each layer adds fields to `simulation_summary.json`; absent
-  layers produce explicit `not_available` blocks.
+- Keep Qwen frozen until Step 3 and Step 4 gates pass.
+- Add one improvement at a time:
+  - continuous residual on top of the discrete action codebook;
+  - mixture head for multi-modal futures;
+  - sampled codebook decoding;
+  - selected-player crop or mask;
+  - nearby player context.
 
-Artifacts: `training/train_events.py`, `event_model_report.json` with
-calibration by game state and time bucket, updated CLI + schema bump. Visual:
-event rollout tree panel.
+Losses:
 
-Gate: beats team-rate and time-bucket baselines for next event type, next
-shot, and next goal; the same `run_match` command runs with any subset of
-available checkpoints.
+- Smooth L1 or MSE for xy.
+- Cross entropy for action labels.
+- NLL/CRPS once probabilistic outputs exist.
+- Behavior-cloning anchor for any post-training changes.
 
-### Step 6: M3 tactical value
+Metrics:
 
-Scope: per the M3 spec below, structured-input model (no VLM features at
-first): P(shot within T) and P(goal within T) straight from the SoccerNet
-event labels; possession-value and turnover targets activate once events are
-joined with the tracking clips.
+- ADE/FDE.
+- minADE@K and minFDE@K.
+- NLL/CRPS for probabilistic futures.
+- Action accuracy and top-k action accuracy.
+- Violation rate.
 
-Artifacts: `training/train_value.py`, `value_model_report.json` with
-calibration by score state/zone/time. Visual: pitch value heatmap panel.
+Gate:
 
-Gate: beats location-only and team-rate heuristics; does not collapse to "run
-toward goal"; calibrated enough that search cannot exploit obvious bugs.
+- Each modeling change beats the previous checkpoint on held-out moving-player
+  samples or is reverted.
+- Multi-sample futures improve minADE@K without producing physically implausible
+  averages or samples.
 
-### Step 7: Search realism, then post-training
+## Step 6: MCTS Realism And Post-Training
 
-Scope, in two halves that ship separately:
+Scope:
 
-- Realism penalties in trajectory MCTS (off-pitch, speed cap,
-  teleport/acceleration violations, low policy likelihood); a real
-  `search_diagnostics.json` at the trajectory level (root branch priors,
-  visits, values, selected path — the data already exists in
-  `training/mcts.py`); violation-rate metrics in eval.
-- M4 post-training: sample K candidate futures from M2, score with imitation
-  value + tactical value + realism penalties, normalize rewards within the
-  group, update with advantage-weighted regression or a GRPO-style objective,
-  keep a behavior-cloning + KL anchor. Implemented directly in PyTorch per
-  docs/training_plan.md (no Trainer frameworks).
+- Keep MCTS focused on selected-player movement.
+- Add realism penalties:
+  - low policy likelihood;
+  - impossible speed;
+  - impossible acceleration;
+  - large teleport steps;
+  - off-image/off-pitch once pitch coordinates exist.
+- Promote `search_diagnostics.json` from stub-like summary to a first-class
+  artifact:
+  - root priors;
+  - visits;
+  - values;
+  - selected path;
+  - realism penalties;
+  - policy/value disagreement.
+- Add post-training only after the supervised tracking loop and baselines are
+  stable:
+  - sample K futures;
+  - score with imitation value and realism penalties;
+  - normalize rewards within the group;
+  - update with AWR/DPO/GRPO-style objective;
+  - keep behavior-cloning and KL anchors.
 
-Artifacts: penalized search + diagnostics artifact, `training/post_train.py`,
-before/after eval report. Visual: MCTS root branch table; side-by-side
-policy-vs-post-trained rollout comparison.
+Gate:
 
-Gate (search): MCTS matches or beats the raw policy on imitation value without
-increasing physical-violation rate. Gate (post-training): value metrics
-improve, ADE/FDE degradation stays within a stated tolerance, KL from the
-supervised policy bounded, violation rate flat, manual review finds no reward
-exploits.
+- MCTS improves imitation/search value without increasing physical violations.
+- Post-training improves selected metrics without degrading ADE/FDE beyond a
+  stated tolerance.
+- Manual review finds no obvious reward exploitation.
 
-### Step 8: Full integration and the failure gallery
+## Step 7: Pitch Coordinates And Multi-Player Tracking
 
-Scope: `run_match` runs M0+M1 always, attaches M2/M3/M4 player-level output
-for snapshots where tracking or video-derived state exists; post-match audits
-accumulate in the calibration ledger; the visualizer gains a failure gallery
-(worst held-out samples by FDE, identity switches, calibration misses, reward
-exploits) that is curated continuously from Step 3 onward.
+Do this after the selected-player loop is stable.
 
-Artifacts: integrated CLI, growing calibration ledger, failure gallery.
+Scope:
 
-Gate: one command produces the full End State artifact set from a real
-snapshot, and every claim in the prediction card traces to a backtest or
-audit artifact.
+- Add pitch calibration confidence where available.
+- Project player footpoints or center-bottom box points to pitch coordinates.
+- Add nearby teammate/opponent context.
+- Add ball context if available.
+- Move from selected-player prediction toward multi-player state rollout.
 
-## Model Specs
+Gate:
 
-The per-model specs below are the reference for the steps above.
+- Pitch-space metrics exist.
+- Image-space and pitch-space artifacts are both inspectable.
+- Player movement remains better than motion baselines.
 
-### M0: Score And Outcome Model
+## Visualizer Requirements
 
-- Fit scoring hazards from historical matches; condition on score state, time,
-  red cards, team strength, knockout context.
-- Loss/metrics: NLL for final scoreline/outcome; Brier and calibration for
-  win/draw/loss and next-goal; backtests from minute 0, halftime, minute 75.
-- Gate: beats static pre-match team-strength baseline; deterministic for
-  seed 7.
+The visualizer is a debugging tool, not only a demo.
 
-### M1: Event Transition Model
+It should show:
 
-- Data: SoccerNet action-spotting event sequences (event type + timestamp per
-  event, with team side and score derivable from the label stream). Location,
-  possession, and xG fields are extensions that require joining events with
-  tracking or adding a richer event corpus later. Current World Cup feeds are
-  inference snapshots only, never training data for pre-registered
-  predictions.
-- Inputs: clock, score, strengths, cards, subs, previous N events; possession
-  team, field zone, player role, and pressure proxy once available.
-- Targets: next event type, time-to-event, shot and goal probability;
-  location/zone and possession continuation once available.
-- Model: small tabular/MLP or sequence transformer; separate from Qwen.
-- Loss/metrics: CE for type; NLL/pinball for time; BCE/Brier for shot/goal;
-  calibration by game state and time bucket.
-- Gate: beats team-rate and time-bucket baselines.
-
-### M2: Trajectory And World Model
-
-- Data: SoccerNet tracking frame windows and MOT boxes. Image-normalized
-  coordinates for now — note that camera pan is confounded with player motion
-  in this space, which is exactly why the constant-velocity baseline (Step 1),
-  eval-scale baseline reporting (Step 3), and motion-bucket reporting are
-  mandatory. Move to pitch coordinates (with calibration confidence) before
-  making any tactical claims.
-- Inputs: last 3-8 frames, selected player box, recent xy history; later ball
-  state, nearby players, team side, event context, pitch calibration.
-- Targets: next 1-2s of selected-player xy; codebook action labels; later
-  multi-player and K-sample futures.
-- Model: frozen Qwen2-VL features + trainable heads (current baseline). Keep
-  the VLM frozen until the Step 3 gates pass. Add mixture/residual outputs
-  after the discrete baseline.
-- Loss/metrics: Smooth L1/MSE for xy; CE for actions; NLL/CRPS once
-  probabilistic; ADE/FDE at 0.4/1.0/2.0s; minADE@K; speed/acceleration/
-  off-pitch/teleport violation rates.
-- Gates: overfit gate (done); held-out moving samples beat constant velocity;
-  results reported by motion bucket.
-
-### M3: Tactical Value Model
-
-- Data: event sequences labeled by future shot/goal/possession outcomes;
-  trajectory rollouts aligned to event outcomes where available;
-  counterfactual negatives from perturbed but physically plausible
-  trajectories.
-- Targets: P(shot within T), P(goal within T), possession value / xT delta,
-  turnover risk, optional pairwise preference between candidate actions.
-- Model: MLP/transformer over structured state first; VLM features only after
-  the structured model is calibrated.
-- Loss/metrics: BCE/Brier; pairwise ranking loss; calibration curves; manual
-  review of high-value recommendations.
-- Gate: beats location-only and team-rate heuristics; no "run toward goal"
-  collapse; robust enough that MCTS cannot exploit it.
-
-### M4: MCTS And Post-Training
-
-- MCTS state: recent positions, velocity, event context, score, clock, value
-  state. Actions: short movement chunks (intent + chunk later). Priors: M2
-  policy. Value: tactical value + imitation value + event continuation.
-  Penalties: low likelihood, off-pitch, impossible speed, collision, spacing.
-- Post-training: group-normalized candidate scoring with AWR/DPO/GRPO-style
-  updates plus BC + KL anchor; re-evaluate against held-out SoccerNet and
-  historical event snapshots.
-- Metrics: value improvement over policy rollout, ADE/FDE degradation
-  tolerance, KL from supervised policy, violation rate, search latency,
-  reward-exploit rate from manual review.
-- Gate: search and post-training improve value without degrading realism.
-
-## Data Sources
-
-All training runs on SoccerNet, which is already wired into this repository:
-the `soccernet-tracking` Modal volume, downloaded via `SoccerNetDownloader` in
-`modal_train.py`. Steps that need data SoccerNet's tracking task does not
-carry pull it from other SoccerNet tasks through the same downloader onto the
-same volume — no new external corpus is a prerequisite for any step.
-
-- **M2:** SoccerNet tracking-2023 (already on the volume; the current training
-  loop uses it).
-- **M1/M3:** SoccerNet action-spotting labels — goals, shots, cards,
-  substitutions, and the other labeled event classes with timestamps across
-  hundreds of broadcast games. Default corpus for the event and value models.
-- **M0:** goal timestamps, card events, and final scores derived from the same
-  action-spotting labels give scoring hazards and outcome labels directly.
-- **World Cup 2026 snapshots:** inference inputs and audit ground truth only,
-  never training data before the audit closes. The one thing SoccerNet cannot
-  provide is strength priors for international sides — keep that as a small
-  manual ratings table inside the snapshot (`TeamState.strength` already
-  exists), not a training dependency.
-
-External corpora (e.g. StatsBomb Open Data with full event locations) are an
-optional later extension if the SoccerNet event labels prove too coarse — not
-a prerequisite.
-
-## Data Validation That Matters
-
-SoccerNet tracking (Step 3):
-
-- No train/eval sequence overlap; no future frames or boxes in input.
-- Track continuity through input and target windows.
-- Bounding boxes in bounds with sane sizes.
-- Motion buckets: stationary, walking, sprinting, turning, occluded.
-- Pitch calibration confidence before pitch-space tactical claims.
-
-Event data (Steps 2 and 5):
-
-- Chronological order and clock consistency; score/card state matches event
-  history; stable identifiers; one coordinate convention; licensing permits
-  training and derived artifacts.
-
-World Cup snapshots (Step 2):
-
-- Snapshot saved before the simulated future; source and fetch time stored as
-  epoch UTC; manual entries marked manual; missing fields explicit unknowns.
-
-## What We Show Visually
-
-Each item lands with its step, not at the end:
-
-- One-sample debug view with real SoccerNet frames, selected player, target path,
-  learned path, constant-position baseline, constant-velocity baseline, MCTS
-  path, action logits, action labels, value outputs, loss terms, activation
-  stats, and gradient norms (Step 1).
-- Scoreline histogram, win/draw/loss panel, and next-goal fan chart (Step 2).
-- Eval-scale baseline vs. learned vs. MCTS trajectory overlay on real frames
-  (Step 3; the actual/pred/MCTS overlay already exists).
-- Probabilistic future fan (Step 4).
-- Possession/event rollout tree (Step 5).
-- Pitch value heatmap (Step 6).
-- MCTS root branch table with priors, visits, values, selected action;
-  policy-vs-post-trained side-by-side (Step 7).
-- Failure gallery: worst held-out samples, identity switches, calibration
-  misses, reward exploits (grows continuously from Step 3).
-
-## Decision Points
-
-Revisit these explicitly, not silently:
-
-- After Step 4: is the frozen backbone + head still beating baselines at full
-  split scale? If not, consider LoRA on top Qwen layers — but only then.
-- After Step 5: are event rollouts good enough to replace the Poisson goal
-  layer inside `run_match`, or do they stay a diagnostic?
-- After July 19: shift the World Cup surface from live prediction to replay
-  backtesting and calibration reporting.
+- input frames;
+- selected-player box;
+- actual future path;
+- constant-position path;
+- constant-velocity path;
+- learned greedy path;
+- MCTS path;
+- action logits and target action bucket;
+- value outputs;
+- loss terms;
+- activation summary stats;
+- gradient norms and warnings;
+- worst/failure examples by FDE and motion bucket.
 
 ## Do Not Do Yet
 
-- Do not tune the Qwen backbone before the frozen-feature baseline beats
-  motion baselines (Step 3) at scale (Step 4).
-- Do not claim optimal strategy from imitation alone.
-- Do not run RL post-training without a calibrated value model (Step 6) and
-  realism penalties (Step 7).
-- Do not use current World Cup results or events after the snapshot time in a
-  pre-registered prediction.
-- Do not block the simulator on live tracking access; event/outcome layers
-  first, player-level tracking attached where available.
-- Do not build config/orchestration frameworks; the artifact contracts and CI
-  from Step 1 are the coordination mechanism.
+- Do not build match-state or team-state abstractions.
+- Do not build scoreline or World Cup outcome simulation.
+- Do not start event modeling.
+- Do not tune the Qwen backbone before the frozen-feature tracking head beats
+  motion baselines.
+- Do not add post-training until the supervised tracking loop is measurable,
+  visual, and stable.
+- Do not build broad orchestration frameworks; artifact contracts and Modal
+  scripts are enough for now.

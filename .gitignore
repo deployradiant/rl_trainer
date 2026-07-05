@@ -7,7 +7,6 @@ __pycache__/
 .ruff_cache/
 *.pt
 *.json
-!examples/*.example.json
 training_history.json
 trajectory_head.pt
 trajectory_preview.png
