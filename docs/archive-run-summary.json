@@ -1,0 +1,77 @@
+{
+  "source": "Existing soccernet-tracking Modal volume artifacts; training revision not recorded in these artifacts",
+  "manifest": {
+    "seed": 7,
+    "train_sequences": [
+      "SNMOT-107"
+    ],
+    "eval_sequences": [
+      "SNMOT-157"
+    ],
+    "input_frames": 25,
+    "visual_frames": 5,
+    "horizon": 50,
+    "overfit_samples": 1,
+    "policy_kind": "chunk",
+    "mcts_simulations": 0
+  },
+  "last_recorded_epoch": 100,
+  "first_recorded_metrics": {
+    "train_ADE": 0.17196126282215118,
+    "train_FDE": 0.43648195266723633
+  },
+  "last_recorded_metrics": {
+    "train_ADE": 0.12059138715267181,
+    "train_FDE": 0.19517967104911804,
+    "eval_ADE": 0.12059138715267181,
+    "eval_FDE": 0.19517967104911804
+  },
+  "rollouts": [
+    {
+      "sequence": "SNMOT-107",
+      "track_id": 1,
+      "start_frame": 151,
+      "metrics": {
+        "ADE": 0.12059137970209122,
+        "FDE": 0.19517967104911804,
+        "tracking_ADE": 0.09936577081680298,
+        "tracking_FDE": 0.1866544634103775,
+        "baseline_constant_ADE": 0.18942655622959137,
+        "baseline_constant_FDE": 0.4675191044807434,
+        "baseline_velocity_ADE": 0.1766701489686966,
+        "baseline_velocity_FDE": 0.4423394799232483,
+        "actual_displacement": 0.4675191044807434,
+        "pred_displacement": 0.2774762511253357,
+        "tracking_displacement": 0.28442996740341187,
+        "baseline_constant_displacement": 0.0,
+        "baseline_velocity_displacement": 0.02549910545349121,
+        "action_accuracy": null,
+        "teacher_action_accuracy": null,
+        "imitation_value_action_accuracy": null
+      }
+    },
+    {
+      "sequence": "SNMOT-157",
+      "track_id": 7,
+      "start_frame": 151,
+      "metrics": {
+        "ADE": 0.36823299527168274,
+        "FDE": 0.5428218841552734,
+        "tracking_ADE": 0.33509203791618347,
+        "tracking_FDE": 0.5543414354324341,
+        "baseline_constant_ADE": 0.23945119976997375,
+        "baseline_constant_FDE": 0.43842431902885437,
+        "baseline_velocity_ADE": 0.17654567956924438,
+        "baseline_velocity_FDE": 0.3147503733634949,
+        "actual_displacement": 0.43842431902885437,
+        "pred_displacement": 0.14188647270202637,
+        "tracking_displacement": 0.15556557476520538,
+        "baseline_constant_displacement": 0.0,
+        "baseline_velocity_displacement": 0.12412097305059433,
+        "action_accuracy": null,
+        "teacher_action_accuracy": null,
+        "imitation_value_action_accuracy": null
+      }
+    }
+  ]
+}
