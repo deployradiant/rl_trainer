@@ -1,6 +1,15 @@
 # RL Trainer
 
-This is an experiment repository with the goal of demonstrating end-to-end RL training of an LLM for a specific task.
+## Status: archived — never finished
+
+This project was never finished and is no longer actively developed or maintained.
+The repository is archived for reference. The code, plans, and commands below
+capture the unfinished experiment and do not represent a completed end-to-end
+RL training system.
+
+## Original project overview
+
+This was an experiment repository with the goal of demonstrating end-to-end RL training of an LLM for a specific task.
 
 The task in question is understanding a set of images from a football match and predicting or advising players next moves.
 
@@ -8,13 +17,11 @@ The moves are then overlayed onto the result of the game.
 
 This starts with one player.
 
-See [docs/training_plan.md](docs/training_plan.md) for the current working plan
+See [docs/training_plan.md](docs/training_plan.md) for the historical working plan
 and minimal initial training goal. See
 [docs/football_rl_implementation_plan.md](docs/football_rl_implementation_plan.md)
 for the tracking-first plan centered on SoccerNet player movement, Modal debug
 runs, baselines, visual diagnostics, MCTS, and RL-style post-training.
-Small documentation-only commits are useful for verifying the local Git workflow
-before larger training changes.
 
 Initial real-data run: deterministic SoccerNet `train` split sequence subsets
 with seed `7`, using `10%` of sequences for training and `2%` for held-out eval.
@@ -61,7 +68,7 @@ pre-commit run --all-files
 The hooks run `ruff check --fix` and `ruff format` before commits. Ruff also
 flags unused imports, unused local variables, and unused unpacked variables.
 
-Run the current one-sample learned-value MCTS overfit gate with:
+The last documented one-sample learned-value MCTS overfit gate command was:
 
 ```bash
 uvx modal run modal_train.py --split train --train-sequence-count 1 --eval-sequence-count 1 --input-frames 5 --horizon 50 --action-stride 5 --stride 25 --max-frames 250 --overfit-samples 1 --sample-selection max_motion --epochs 200 --batch-size 1 --lr 0.003 --cache-visual-features --feature-cache-batch-size 1 --policy-loss-weight 1.0 --value-loss-weight 1.0 --value-rank-loss-weight 1.0 --value-fde-weight 0.5 --value-target-scale 10.0 --mcts-simulations 192 --mcts-top-k 10 --mcts-c-puct 1.5 --seed 7
